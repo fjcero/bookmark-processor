@@ -1,0 +1,37 @@
+{
+  "exportVersion": 2,
+  "exportedAt": "2026-09-06T21:28:01.185Z",
+  "source": "bookmark",
+  "origin": "x-bookmark-export-v2",
+  "tweets": {
+    "12365342": {
+      "__typename": "User",
+      "rest_id": "12365342",
+      "core": { "name": "Xoan", "screen_name": "xo4n" },
+      "avatar": { "image_url": "https://pbs.twimg.com/profile_images/test.jpg" }
+    },
+    "2096448005696266546": {
+      "__typename": "Tweet",
+      "rest_id": "2096448005696266546",
+      "core": {
+        "user_results": {
+          "result": {
+            "__typename": "User",
+            "rest_id": "14196511",
+            "core": { "name": "Karri Saarinen", "screen_name": "karrisaarinen" },
+            "avatar": { "image_url": "https://pbs.twimg.com/profile_images/test2.jpg" }
+          }
+        }
+      },
+      "legacy": {
+        "created_at": "Sun Sep 06 03:58:49 +0000 2026",
+        "full_text": "Agents and Linear documents.",
+        "user_id_str": "14196511",
+        "entities": {
+          "user_mentions": [{ "screen_name": "linear" }]
+        }
+      }
+    }
+  },
+  "responses": []
+}
