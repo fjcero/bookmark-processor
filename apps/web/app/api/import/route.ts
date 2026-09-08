@@ -1,113 +1,111 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { inArray, sql } from 'drizzle-orm'
-import { parseExportV2 } from '@repo/import'
-import { db, imports, items, users } from '@repo/db'
-import { createId } from '@/lib/ids'
+import { NextRequest, NextResponse } from "next/server";
+import { importExportJson } from "@/lib/import-core";
+import {
+	getImportPrefs,
+	selectedStages,
+	setImportPrefs,
+	type ImportPrefs,
+} from "@/lib/settings";
+import { getProcessState, startProcess } from "@/lib/processor";
 
-export const runtime = 'nodejs'
-export const dynamic = 'force-dynamic'
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+type FileImportResult = Awaited<ReturnType<typeof importExportJson>>;
+
+async function importOneFile(file: File, now: Date): Promise<FileImportResult> {
+	const text = await file.text();
+	return importExportJson(text, file.name, now);
+}
+
+function getUploadFiles(form: FormData): File[] {
+	const fromMulti = form
+		.getAll("file")
+		.filter((entry): entry is File => entry instanceof File);
+	if (fromMulti.length > 0) return fromMulti;
+	const single = form.get("file");
+	return single instanceof File ? [single] : [];
+}
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  const form = await request.formData()
-  const file = form.get('file')
-  if (!(file instanceof File)) {
-    return NextResponse.json({ error: 'Missing file' }, { status: 400 })
-  }
+	const form = await request.formData();
+	const files = getUploadFiles(form);
+	if (files.length === 0) {
+		return NextResponse.json({ error: "Missing file" }, { status: 400 });
+	}
 
-  const text = await file.text()
-  let parsed
-  try {
-    parsed = parseExportV2(text)
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Failed to parse export'
-    return NextResponse.json({ error: msg }, { status: 400 })
-  }
+	const saved = await getImportPrefs();
+	const prefs: ImportPrefs = {
+		entities: parseFormFlag(form.get("entities"), saved.entities),
+		understanding: parseFormFlag(
+			form.get("understanding"),
+			saved.understanding,
+		),
+		categorize: parseFormFlag(form.get("categorize"), saved.categorize),
+	};
+	await setImportPrefs(prefs);
 
-  const now = new Date()
-  const userIds = parsed.users.map((u) => u.id)
-  const existingUsers =
-    userIds.length > 0
-      ? await db.select({ id: users.id }).from(users).where(inArray(users.id, userIds))
-      : []
-  const existingUserIds = new Set(existingUsers.map((u) => u.id))
+	const now = new Date();
+	const results: FileImportResult[] = [];
+	for (const file of files) {
+		results.push(await importOneFile(file, now));
+	}
 
-  if (parsed.users.length > 0) {
-    const CHUNK = 200
-    for (let i = 0; i < parsed.users.length; i += CHUNK) {
-      const slice = parsed.users.slice(i, i + CHUNK)
-      await db
-        .insert(users)
-        .values(
-          slice.map((u) => ({
-            id: u.id,
-            handle: u.handle,
-            name: u.name,
-            avatarUrl: u.avatarUrl,
-            rawJson: u.rawJson,
-            updatedAt: now,
-          })),
-        )
-        .onConflictDoUpdate({
-          target: users.id,
-          set: {
-            handle: sql`excluded.handle`,
-            name: sql`excluded.name`,
-            avatarUrl: sql`excluded.avatar_url`,
-            rawJson: sql`excluded.raw_json`,
-            updatedAt: now,
-          },
-        })
-    }
-  }
+	const failures = results.filter((r) => r.error);
+	if (failures.length === results.length) {
+		return NextResponse.json(
+			{
+				error: failures.map((r) => `${r.filename}: ${r.error}`).join("; "),
+				files: results,
+			},
+			{ status: 400 },
+		);
+	}
 
-  const tweetIds = parsed.tweets.map((t) => t.id)
-  const existingItems =
-    tweetIds.length > 0
-      ? await db.select({ tweetId: items.tweetId }).from(items).where(inArray(items.tweetId, tweetIds))
-      : []
-  const existingTweetIds = new Set(existingItems.map((i) => i.tweetId))
+	const totals = {
+		users: {
+			imported: results.reduce((n, r) => n + r.users.imported, 0),
+			skipped: results.reduce((n, r) => n + r.users.skipped, 0),
+		},
+		items: {
+			imported: results.reduce((n, r) => n + r.items.imported, 0),
+			skipped: results.reduce((n, r) => n + r.items.skipped, 0),
+		},
+	};
 
-  const newTweets = parsed.tweets.filter((t) => !existingTweetIds.has(t.id))
-  if (newTweets.length > 0) {
-    const CHUNK = 200
-    for (let i = 0; i < newTweets.length; i += CHUNK) {
-      const slice = newTweets.slice(i, i + CHUNK)
-      await db
-        .insert(items)
-        .values(
-          slice.map((t) => ({
-            id: createId(),
-            tweetId: t.id,
-            authorId: t.authorId,
-            text: t.text,
-            tweetCreatedAt: t.createdAt,
-            source: t.source,
-            rawJson: t.rawJson,
-            importedAt: now,
-          })),
-        )
-        .onConflictDoNothing({ target: items.tweetId })
-    }
-  }
+	const stages = selectedStages(prefs);
+	let processing = false;
+	if (stages.length > 0 && totals.items.imported > 0) {
+		if (getProcessState().status !== "running") {
+			processing = true;
+			void startProcess({ stages });
+		}
+	}
 
-  const usersImported = parsed.users.filter((u) => !existingUserIds.has(u.id)).length
-  const usersSkipped = parsed.users.length - usersImported
-  const itemsImported = newTweets.length
-  const itemsSkipped = parsed.tweets.length - itemsImported
+	const first = results[0];
+	return NextResponse.json({
+		filename: files.length === 1 ? first.filename : `${files.length} files`,
+		files: results,
+		totals,
+		parsed: {
+			users: results.reduce((n, r) => n + r.parsed.users, 0),
+			items: results.reduce((n, r) => n + r.parsed.items, 0),
+		},
+		users: totals.users,
+		items: totals.items,
+		prefs,
+		processing,
+		errors:
+			failures.length > 0
+				? failures.map((r) => `${r.filename}: ${r.error}`)
+				: undefined,
+	});
+}
 
-  await db.insert(imports).values({
-    id: createId(),
-    filename: file.name,
-    usersImported,
-    itemsImported,
-    usersSkipped,
-    itemsSkipped,
-  })
-
-  return NextResponse.json({
-    filename: file.name,
-    parsed: { users: parsed.users.length, tweets: parsed.tweets.length },
-    users: { imported: usersImported, skipped: usersSkipped },
-    items: { imported: itemsImported, skipped: itemsSkipped },
-  })
+function parseFormFlag(
+	value: FormDataEntryValue | null,
+	fallback: boolean,
+): boolean {
+	if (value == null || value === "") return fallback;
+	return value === "true" || value === "1" || value === "on";
 }

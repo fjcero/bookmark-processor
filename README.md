@@ -15,6 +15,8 @@ pnpm dev
 
 Open [http://localhost:3000](http://localhost:3000). Upload a `bookmarks.json` from `@repo/import` capture, then click Process.
 
+**Chrome extension (recommended):** see [`apps/extension`](apps/extension) — captures on x.com and posts directly to `/api/import/capture`.
+
 ## Packages
 
 | Package | Role |

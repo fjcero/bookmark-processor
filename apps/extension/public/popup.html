@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bookmark Processor</title>
+    <style>
+      body {
+        margin: 0;
+        font: 13px/1.4 system-ui, sans-serif;
+        color: #e4e4e7;
+        background: #09090b;
+        width: 320px;
+      }
+      main {
+        padding: 14px;
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 14px;
+      }
+      label {
+        display: block;
+        font-size: 11px;
+        color: #a1a1aa;
+        margin-bottom: 4px;
+      }
+      input[type="text"],
+      input[type="number"] {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 8px 10px;
+        border-radius: 8px;
+        border: 1px solid #3f3f46;
+        background: #18181b;
+        color: #fafafa;
+        margin-bottom: 10px;
+      }
+      fieldset {
+        border: 1px solid #27272a;
+        border-radius: 8px;
+        padding: 8px 10px 10px;
+        margin: 0 0 12px;
+      }
+      legend {
+        font-size: 11px;
+        color: #a1a1aa;
+        padding: 0 4px;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+      }
+      .row label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin: 0;
+        color: #d4d4d8;
+      }
+      button {
+        width: 100%;
+        padding: 9px 12px;
+        border: none;
+        border-radius: 8px;
+        background: #4f46e5;
+        color: white;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button.secondary {
+        margin-top: 8px;
+        background: #27272a;
+        color: #e4e4e7;
+      }
+      #status {
+        margin-top: 10px;
+        font-size: 12px;
+        color: #a1a1aa;
+        min-height: 16px;
+      }
+      .hint {
+        margin-top: 8px;
+        font-size: 11px;
+        color: #71717a;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Bookmark Processor</h1>
+      <label for="serverUrl">Server URL</label>
+      <input
+        id="serverUrl"
+        type="text"
+        placeholder="http://localhost:3000"
+        spellcheck="false"
+      />
+      <fieldset>
+        <legend>Sync</legend>
+        <label class="row" style="margin-bottom: 8px">
+          <input type="checkbox" id="autoSync" checked />
+          Auto-sync to server while capturing
+        </label>
+        <div class="row">
+          <label><input type="radio" name="mode" value="api" checked /> Send to server</label>
+          <label><input type="radio" name="mode" value="download" /> Download JSON</label>
+        </div>
+      </fieldset>
+      <label for="scrollDelayMs">Scroll delay (ms)</label>
+      <input
+        id="scrollDelayMs"
+        type="number"
+        min="100"
+        max="5000"
+        step="50"
+        value="300"
+      />
+      <button id="save">Save settings</button>
+      <button id="toggle" class="secondary">Toggle capture on this tab</button>
+      <p id="status"></p>
+      <p class="hint">
+        Capture starts on x.com bookmarks, likes, or history. New tweets sync to your server automatically.
+      </p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

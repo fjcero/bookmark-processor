@@ -17,6 +17,66 @@ fs.mkdirSync(path.dirname(dbPath), { recursive: true })
 const sqlite = new Database(dbPath)
 sqlite.pragma('journal_mode = WAL')
 sqlite.pragma('foreign_keys = ON')
+migrateItems(sqlite)
+
+function migrateItems(database: InstanceType<typeof Database>): void {
+  const table = database
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'items'`)
+    .get() as { name?: string } | undefined
+  if (!table) return
+  const cols = database
+    .prepare(`PRAGMA table_info(items)`)
+    .all() as Array<{ name: string }>
+  const names = new Set(cols.map((col) => col.name))
+  if (!names.has('sort_index')) {
+    database.exec(`ALTER TABLE items ADD COLUMN sort_index TEXT`)
+  }
+  if (!names.has('hydrate_requested_at')) {
+    database.exec(`ALTER TABLE items ADD COLUMN hydrate_requested_at INTEGER`)
+  }
+  if (!names.has('capture_unavailable_at')) {
+    database.exec(`ALTER TABLE items ADD COLUMN capture_unavailable_at INTEGER`)
+  }
+  database.exec(`CREATE INDEX IF NOT EXISTS items_sort_index_idx ON items(sort_index)`)
+  database.exec(
+    `CREATE INDEX IF NOT EXISTS items_hydrate_requested_at_idx ON items(hydrate_requested_at)`,
+  )
+  database.exec(
+    `CREATE INDEX IF NOT EXISTS items_capture_unavailable_at_idx ON items(capture_unavailable_at)`,
+  )
+  database.exec(`
+    UPDATE items
+    SET sort_index = json_extract(raw_json, '$._sortIndex')
+    WHERE sort_index IS NULL
+      AND json_extract(raw_json, '$._sortIndex') IS NOT NULL
+  `)
+  database.exec(`
+    UPDATE items
+    SET content_type = 'article'
+    WHERE content_type = 'post'
+      AND json_extract(raw_json, '$.article.article_results.result.rest_id') IS NOT NULL
+  `)
+  database.exec(`
+    UPDATE items
+    SET url = 'https://x.com/i/article/' || json_extract(raw_json, '$.article.article_results.result.rest_id')
+    WHERE content_type = 'article'
+      AND json_extract(raw_json, '$.article.article_results.result.rest_id') IS NOT NULL
+      AND (url IS NULL OR url NOT LIKE '%/i/article/%')
+  `)
+  database.exec(`
+    UPDATE items
+    SET text = trim(
+      json_extract(raw_json, '$.article.article_results.result.title')
+      || char(10) || char(10)
+      || coalesce(json_extract(raw_json, '$.article.article_results.result.preview_text'), '')
+    )
+    WHERE content_type = 'article'
+      AND json_extract(raw_json, '$.article.article_results.result.content_state.blocks[0].text') IS NULL
+      AND json_extract(raw_json, '$.article.article_results.result.title') IS NOT NULL
+      AND text = json_extract(raw_json, '$.article.article_results.result.title')
+      AND json_extract(raw_json, '$.article.article_results.result.preview_text') IS NOT NULL
+  `)
+}
 
 export const db = drizzle(sqlite, { schema })
 export { sqlite }

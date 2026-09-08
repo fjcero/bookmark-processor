@@ -4,11 +4,16 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./capture/engine": "./capture/engine.ts",
+    "./capture/hooks": "./capture/hooks.ts",
+    "./capture/hooks-events": "./capture/hooks-events.ts",
+    "./capture/hooks-install": "./capture/hooks-install.ts"
   },
   "scripts": {
     "build": "tsc --noEmit",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test src/article.test.ts src/article-html.test.ts src/article-request.test.ts src/article-queue.test.ts src/sort-index.test.ts"
   },
   "devDependencies": {
     "typescript": "^5.9.2"

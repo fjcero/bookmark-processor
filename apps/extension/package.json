@@ -1,0 +1,24 @@
+{
+  "name": "extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm build:watch",
+    "build": "vite build --mode inject && vite build --mode background && vite build --mode content && vite build --mode popup",
+    "build:watch": "pnpm build && pnpm run --parallel /^build:watch:/",
+    "build:watch:inject": "vite build --mode inject --watch",
+    "build:watch:background": "vite build --mode background --watch",
+    "build:watch:content": "vite build --mode content --watch",
+    "build:watch:popup": "vite build --mode popup --watch",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@repo/import": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.328",
+    "typescript": "^5.9.2",
+    "vite": "^6.3.5"
+  }
+}

@@ -1,0 +1,729 @@
+import {
+	CaptureEngine,
+	downloadPayload,
+	runAutoScroll,
+} from "@repo/import/capture/engine";
+import {
+	articleFromDocument,
+	hasFullArticleBody,
+	isArticleUnavailableDocument,
+	isUnsupportedClientDocument,
+	pendingArticleFromRaw,
+	type GraphQLArticleResult,
+} from "@repo/import";
+import { clearCaptureQueue } from "@repo/import/capture/hooks-events";
+import type { CaptureEventDetail } from "@repo/import/capture/hooks-events";
+import {
+	createBackgroundStorageAdapter,
+	fetchTotalInBackground,
+	seedTimelineInBackground,
+	syncInBackground,
+	type TimelineProgress,
+} from "./background-client";
+import { loadSettings } from "./storage";
+import {
+	mountSidebarUiWithRetry,
+	setArticleStatus,
+	setAutoScrollUi,
+	setSyncRetryVisible,
+	setSyncStatus,
+	showToast,
+	trackWorkerActivity,
+	type SidebarUiRefs,
+	unmountSidebarUi,
+	updateSidebarCount,
+	updateServerTotal,
+} from "./sidebar-ui";
+import { clickTimelineRetry } from "./timeline-recovery";
+
+const SYNC_INTERVAL_MS = 1500;
+const SYNC_BATCH_SIZE = 20;
+
+function isArticlePage(): boolean {
+	if (
+		!location.hostname.includes("twitter.com") &&
+		!location.hostname.includes("x.com")
+	) {
+		return false;
+	}
+	return /\/i\/article\/\d+/.test(location.pathname);
+}
+
+function isCapturePage(): boolean {
+	if (
+		!location.hostname.includes("twitter.com") &&
+		!location.hostname.includes("x.com")
+	) {
+		return false;
+	}
+	return (
+		location.pathname.includes("/bookmarks") ||
+		location.pathname.includes("/likes") ||
+		location.pathname.includes("/history")
+	);
+}
+
+let engine: CaptureEngine | null = null;
+let sidebar: SidebarUiRefs | null = null;
+let autoScrolling = false;
+let uiMounted = false;
+let stopSidebarRetry: (() => void) | null = null;
+let syncTimer: ReturnType<typeof setTimeout> | null = null;
+let syncing = false;
+let syncQueued = false;
+let retryObserver: MutationObserver | null = null;
+let sessionCaptured = 0;
+let sessionImported = 0;
+let sessionSkipped = 0;
+let timelineSeeded = false;
+let timelineSeedInFlight = false;
+let timelineWorkerRunning = false;
+let workerCaptured = 0;
+let workerImported = 0;
+let workerSkipped = 0;
+let lastWorkerMessage = "";
+
+function reportCaptureScroll(active: boolean): void {
+	try {
+		void chrome.runtime.sendMessage({ type: "bp-capture-scroll", active });
+	} catch {
+		/* background unavailable */
+	}
+}
+
+function reportWorker(
+	message: string,
+	tone: "active" | "success" | "error" | "idle" = "active",
+): void {
+	if (!sidebar || message === lastWorkerMessage) return;
+	lastWorkerMessage = message;
+	trackWorkerActivity(sidebar, message, tone);
+}
+
+function applyArticleStats(stats: {
+	pending: number;
+	fetching: number;
+	ok: number;
+	failed: number;
+	total: number;
+}): void {
+	if (!sidebar) return;
+	setArticleStatus(sidebar, stats);
+	const remaining = stats.pending + stats.fetching;
+	if (stats.fetching > 0) {
+		reportWorker(`Loading article · ${remaining} left`);
+	} else if (remaining > 0) {
+		reportWorker(`${remaining} articles queued`);
+	} else if (stats.failed > 0) {
+		reportWorker(`${stats.failed} articles retrying`, "error");
+	} else if (stats.total > 0) {
+		reportWorker("Articles complete", "success");
+	}
+}
+
+function renderSessionProgress(): void {
+	if (!sidebar) return;
+	updateSidebarCount(sidebar, sessionCaptured, "");
+	setSyncStatus(
+		sidebar,
+		`${sessionImported} new · ${sessionSkipped} existing`,
+	);
+}
+
+function trackPendingCount(count: number): void {
+	// Restored unsynced rows count toward this session; subsequent observations
+	// are tracked separately even when the row was already synced before.
+	sessionCaptured = Math.max(sessionCaptured, count);
+	renderSessionProgress();
+}
+
+function applyTimelineProgress(progress: TimelineProgress): void {
+	timelineWorkerRunning = progress.running;
+	if (progress.captured > workerCaptured) {
+		sessionCaptured += progress.captured - workerCaptured;
+	}
+	if (progress.imported > workerImported) {
+		sessionImported += progress.imported - workerImported;
+	}
+	if (progress.skipped > workerSkipped) {
+		sessionSkipped += progress.skipped - workerSkipped;
+	}
+	workerCaptured = Math.max(workerCaptured, progress.captured);
+	workerImported = Math.max(workerImported, progress.imported);
+	workerSkipped = Math.max(workerSkipped, progress.skipped);
+	if (sidebar && progress.libraryTotal != null) {
+		updateServerTotal(sidebar, progress.libraryTotal);
+	}
+	if (progress.error && sidebar) {
+		setSyncStatus(sidebar, progress.error);
+		reportWorker(progress.error, "error");
+	} else {
+		renderSessionProgress();
+		reportWorker(
+			progress.running
+				? `History page ${progress.pages} · ${progress.captured} loaded`
+				: "History pagination complete",
+			progress.running ? "active" : "success",
+		);
+	}
+}
+
+function offerTimelineSeed(detail: CaptureEventDetail): void {
+	if (
+		!engine ||
+		engine.source !== "history" ||
+		timelineSeeded ||
+		timelineSeedInFlight ||
+		!detail.request ||
+		!detail.url.includes("/graphql/")
+	) {
+		return;
+	}
+	timelineSeedInFlight = true;
+	void seedTimelineInBackground(detail, engine.source, location.href)
+		.then((result) => {
+			timelineSeeded = result.accepted;
+			if (result.accepted && autoScrolling) {
+				autoScrolling = false;
+				reportCaptureScroll(false);
+				stopRetryWatcher();
+				if (sidebar) setAutoScrollUi(sidebar, "idle");
+			}
+		})
+		.catch(() => {
+			/* keep DOM scrolling available as fallback */
+		})
+		.finally(() => {
+			timelineSeedInFlight = false;
+		});
+}
+
+function enqueueCapturedArticles(): void {
+	if (!engine) return;
+	const payload = engine.buildPayload();
+	const articles: Array<{ tweetId: string; articleId: string; url: string }> =
+		[];
+	for (const [tweetId, tweet] of Object.entries(payload.tweets)) {
+		const pending = pendingArticleFromRaw(tweetId, JSON.stringify(tweet), null);
+		if (pending) articles.push(pending);
+	}
+	if (articles.length === 0) return;
+	try {
+		void chrome.runtime.sendMessage({ type: "bp-enqueue-articles", articles });
+	} catch {
+		/* background unavailable */
+	}
+}
+
+function watchArticleAvailability(articleId: string): void {
+	let reported = false;
+	const report = () => {
+		if (reported) return;
+		reported = true;
+		try {
+			void chrome.runtime.sendMessage({
+				type: "bp-article-unavailable",
+				articleId,
+			});
+		} catch {
+			/* background unavailable */
+		}
+	};
+
+	const check = () => {
+		if (isArticleUnavailableDocument(document.body)) {
+			report();
+			return true;
+		}
+		return false;
+	};
+
+	window.setTimeout(() => {
+		if (check()) return;
+		const observer = new MutationObserver(() => {
+			if (check()) observer.disconnect();
+		});
+		if (document.body) {
+			observer.observe(document.body, { childList: true, subtree: true });
+		}
+		window.setTimeout(() => observer.disconnect(), 20_000);
+	}, 8_000);
+}
+
+function startArticlePageCapture(): void {
+	const pageArticleId =
+		location.pathname.match(/\/i\/article\/(\d+)/)?.[1] ?? "";
+	let bodySent = false;
+
+	const sendArticleBody = (article: GraphQLArticleResult) => {
+		if (bodySent || !hasFullArticleBody(article)) return;
+		bodySent = true;
+		try {
+			void chrome.runtime.sendMessage({
+				type: "bp-article-body",
+				article,
+			});
+		} catch {
+			/* ignore */
+		}
+	};
+
+	const articleEngine = new CaptureEngine({
+		storeResponses: false,
+		onCapture: (detail) => {
+			if (!pageArticleId) return;
+			try {
+				void chrome.runtime.sendMessage({
+					type: "bp-article-template",
+					detail,
+					articleId: pageArticleId,
+				});
+			} catch {
+				/* ignore */
+			}
+		},
+		onArticleBody: (article: GraphQLArticleResult) => {
+			sendArticleBody({
+				...article,
+				hydration_source: article.hydration_source ?? "graphql",
+			});
+		},
+	});
+	articleEngine.start();
+	if (pageArticleId) {
+		watchArticleHtml(pageArticleId, sendArticleBody, () => bodySent);
+		watchArticleAvailability(pageArticleId);
+	}
+}
+
+function watchArticleHtml(
+	articleId: string,
+	sendArticleBody: (article: GraphQLArticleResult) => void,
+	alreadySent: () => boolean,
+): void {
+	let lastSignature = "";
+	let stableSince = 0;
+
+	const reveal = () => {
+		const column = document.querySelector('[data-testid="primaryColumn"]');
+		if (column) column.scrollTop = column.scrollHeight;
+		window.scrollTo(0, document.documentElement.scrollHeight);
+	};
+
+	const tryExtract = (requireStable: boolean) => {
+		if (alreadySent()) return true;
+		if (
+			isUnsupportedClientDocument(document.body) ||
+			isArticleUnavailableDocument(document.body)
+		) {
+			return false;
+		}
+		const article = articleFromDocument(document, articleId);
+		if (!article) return false;
+		const signature = JSON.stringify(article.content_state?.blocks ?? []);
+		const now = Date.now();
+		if (signature !== lastSignature) {
+			lastSignature = signature;
+			stableSince = now;
+			if (requireStable) return false;
+		}
+		if (requireStable && now - stableSince < 800) return false;
+		sendArticleBody(article);
+		return alreadySent();
+	};
+
+	reveal();
+	const interval = window.setInterval(() => {
+		reveal();
+		if (tryExtract(true)) {
+			window.clearInterval(interval);
+			observer.disconnect();
+		}
+	}, 500);
+	const observer = new MutationObserver(() => {
+		tryExtract(true);
+	});
+	if (document.body) {
+		observer.observe(document.body, {
+			childList: true,
+			subtree: true,
+			characterData: true,
+		});
+	}
+	window.setTimeout(() => {
+		observer.disconnect();
+		window.clearInterval(interval);
+		tryExtract(false);
+	}, 40_000);
+}
+
+async function refreshServerTotal(): Promise<void> {
+	if (!sidebar) return;
+	const settings = await loadSettings();
+	if (settings.mode !== "api" || !settings.serverUrl) {
+		updateServerTotal(sidebar, null);
+		return;
+	}
+	try {
+		const total = await fetchTotalInBackground(settings.serverUrl);
+		if (sidebar) updateServerTotal(sidebar, total);
+	} catch {
+		if (sidebar) updateServerTotal(sidebar, null);
+	}
+}
+
+function clearSyncTimer(): void {
+	if (syncTimer) {
+		clearTimeout(syncTimer);
+		syncTimer = null;
+	}
+}
+
+function scheduleAutoSync(): void {
+	void loadSettings()
+		.then((settings) => {
+			if (!settings.autoSync || settings.mode !== "api" || !settings.serverUrl) {
+				return;
+			}
+			if (syncing) {
+				syncQueued = true;
+				return;
+			}
+			// Fixed-window batching: continuous arrivals must not postpone sync forever.
+			if (syncTimer) return;
+			syncTimer = setTimeout(() => {
+				syncTimer = null;
+				void performSync({ auto: true });
+			}, SYNC_INTERVAL_MS);
+		})
+		.catch(() => {
+			/* extension reloaded while this tab was open */
+		});
+}
+
+function startRetryWatcher(): void {
+	stopRetryWatcher();
+	retryObserver = new MutationObserver(() => {
+		if (autoScrolling) clickTimelineRetry();
+	});
+	const col = document.querySelector('[data-testid="primaryColumn"]');
+	if (col) {
+		retryObserver.observe(col, { childList: true, subtree: true });
+	}
+}
+
+function stopRetryWatcher(): void {
+	retryObserver?.disconnect();
+	retryObserver = null;
+}
+
+async function recoverTimeline(): Promise<boolean> {
+	return clickTimelineRetry();
+}
+
+async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
+	if (!engine || !sidebar) return;
+	if (syncing) {
+		syncQueued = true;
+		return;
+	}
+
+	const pendingPayload = engine.buildPayload();
+	const pendingCount = Object.keys(pendingPayload.tweets).length;
+	if (pendingCount === 0) {
+		if (opts.manual) showToast("Nothing to sync yet — scroll first");
+		return;
+	}
+
+	const settings = await loadSettings();
+
+	if (settings.mode === "download") {
+		downloadPayload(pendingPayload);
+		showToast(`Downloaded ${pendingCount} ${engine.label}`);
+		clearCaptureQueue();
+		await engine.reset();
+		autoScrolling = false;
+		renderSessionProgress();
+		setAutoScrollUi(sidebar, "idle");
+		return;
+	}
+
+	const batchEntries = Object.entries(pendingPayload.tweets).slice(
+		0,
+		SYNC_BATCH_SIZE,
+	);
+	const payload = {
+		...pendingPayload,
+		stats: {
+			...pendingPayload.stats,
+			tweetCount: batchEntries.length,
+		},
+		tweets: Object.fromEntries(batchEntries),
+	};
+
+	if (!settings.serverUrl) {
+		if (opts.manual) showToast("Set server URL in extension popup");
+		return;
+	}
+
+	clearSyncTimer();
+	syncing = true;
+	setSyncRetryVisible(sidebar, false);
+	reportWorker(`Uploading ${Object.keys(payload.tweets).length} items`);
+
+	try {
+		const result = await syncInBackground(payload, settings.serverUrl);
+		engine.removeSynced(Object.keys(payload.tweets));
+		clearCaptureQueue();
+		sessionImported += result.imported;
+		sessionSkipped += result.skipped;
+		renderSessionProgress();
+		updateServerTotal(sidebar, result.total);
+
+		const msg = `${result.imported} new · ${result.skipped} existing`;
+		reportWorker(`Uploaded · ${msg}`, "success");
+		setSyncRetryVisible(sidebar, false);
+		if (opts.manual || result.imported > 0) {
+			showToast(msg);
+		}
+		enqueueCapturedArticles();
+		try {
+			void chrome.runtime.sendMessage({ type: "bp-refresh-articles" });
+		} catch {
+			/* ignore */
+		}
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : "Sync failed";
+		setSyncStatus(sidebar, "Sync failed — click Retry or wait");
+		reportWorker(`Upload failed · ${msg}`, "error");
+		setSyncRetryVisible(sidebar, true);
+		if (opts.manual || !opts.auto) showToast(msg);
+		if (settings.autoSync && engine.tweetCount() > 0) {
+			clearSyncTimer();
+			syncTimer = setTimeout(() => {
+				syncTimer = null;
+				void performSync({ auto: true });
+			}, 8000);
+		}
+	} finally {
+		syncing = false;
+		if (syncQueued || engine.tweetCount() > 0) {
+			syncQueued = false;
+			scheduleAutoSync();
+		}
+	}
+}
+
+function handleAutoScroll(): void {
+	if (!engine || !sidebar) return;
+	if (timelineWorkerRunning) {
+		showToast("History is loading in the background");
+		return;
+	}
+	if (autoScrolling) {
+		autoScrolling = false;
+		stopRetryWatcher();
+		setAutoScrollUi(sidebar, "idle");
+		reportCaptureScroll(false);
+		return;
+	}
+	autoScrolling = true;
+	reportCaptureScroll(true);
+	startRetryWatcher();
+	setAutoScrollUi(sidebar, "running");
+	void loadSettings().then((settings) => {
+		if (!engine || !sidebar) return;
+		void runAutoScroll(
+			engine,
+			(_count, done) => {
+				if (!sidebar || !engine) return;
+				renderSessionProgress();
+				if (done) {
+					autoScrolling = false;
+					reportCaptureScroll(false);
+					stopRetryWatcher();
+					setAutoScrollUi(sidebar, "done", sessionCaptured);
+					void performSync({ auto: true });
+				}
+			},
+			() => autoScrolling,
+			{
+				scrollDelayMs: settings.scrollDelayMs,
+				onStagnant: recoverTimeline,
+			},
+		);
+	});
+}
+
+function mountUi(): void {
+	if (uiMounted || !engine) return;
+
+	const label = engine.label;
+	const count = sessionCaptured;
+
+	stopSidebarRetry = mountSidebarUiWithRetry(
+		{
+			label,
+			count,
+			onSyncRetry: () => void performSync({ manual: true }),
+			onAutoScroll: handleAutoScroll,
+		},
+		(refs) => {
+			sidebar = refs;
+			uiMounted = true;
+			renderSessionProgress();
+			void refreshServerTotal();
+			void chrome.runtime
+				.sendMessage({ type: "bp-article-stats-request" })
+				.then((response) => {
+					const stats = response?.result?.stats ?? response?.stats;
+					if (stats) applyArticleStats(stats);
+				})
+				.catch(() => {
+					/* ignore */
+				});
+		},
+	);
+}
+
+async function startCapture(): Promise<void> {
+	if (!isCapturePage()) return;
+	if (engine) {
+		showToast("Capture already active");
+		return;
+	}
+
+	engine = new CaptureEngine({
+		storage: createBackgroundStorageAdapter(),
+		storeResponses: false,
+		onCapture: offerTimelineSeed,
+		onTweetObserved: () => {
+			sessionCaptured += 1;
+			renderSessionProgress();
+		},
+		onCountChange: (count) => {
+			trackPendingCount(count);
+			if (count > 0) {
+				enqueueCapturedArticles();
+				scheduleAutoSync();
+			}
+		},
+	});
+
+	try {
+		const restored = await engine.restore();
+		engine.start();
+		mountUi();
+		if (restored && engine.tweetCount() > 0) {
+			enqueueCapturedArticles();
+			scheduleAutoSync();
+		}
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		console.warn("[Bookmark Processor] Capture start failed:", msg);
+		engine.start();
+		mountUi();
+	}
+}
+
+async function stopCapture(): Promise<void> {
+	if (!engine) return;
+	clearSyncTimer();
+	stopRetryWatcher();
+	engine.stop();
+	stopSidebarRetry?.();
+	stopSidebarRetry = null;
+	unmountSidebarUi();
+	uiMounted = false;
+	sidebar = null;
+	engine = null;
+	autoScrolling = false;
+	reportCaptureScroll(false);
+	syncing = false;
+	syncQueued = false;
+	sessionCaptured = 0;
+	sessionImported = 0;
+	sessionSkipped = 0;
+	timelineSeeded = false;
+	timelineSeedInFlight = false;
+	timelineWorkerRunning = false;
+	workerCaptured = 0;
+	workerImported = 0;
+	workerSkipped = 0;
+	lastWorkerMessage = "";
+	showToast("Capture stopped");
+}
+
+function registerMessageListener(): void {
+	try {
+		chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+			if (message?.type === "bp-toggle-capture") {
+				void (engine ? stopCapture() : startCapture())
+					.then(() => {
+						try {
+							sendResponse({ active: Boolean(engine) });
+						} catch {
+							/* context invalidated */
+						}
+					})
+					.catch(() => {
+						/* ignore */
+					});
+				return true;
+			}
+			if (message?.type === "bp-article-stats") {
+				if (message.stats) applyArticleStats(message.stats);
+				return false;
+			}
+			if (message?.type === "bp-timeline-progress") {
+				if (message.progress) applyTimelineProgress(message.progress);
+				return false;
+			}
+			if (message?.type === "bp-capture-status") {
+				try {
+					sendResponse({
+						active: Boolean(engine),
+						count: engine?.tweetCount() ?? 0,
+					});
+				} catch {
+					/* context invalidated */
+				}
+				return true;
+			}
+			return false;
+		});
+	} catch {
+		/* context invalidated */
+	}
+}
+
+function hasExtensionContext(): boolean {
+	try {
+		return Boolean(chrome.runtime?.id);
+	} catch {
+		return false;
+	}
+}
+
+function boot(): void {
+	try {
+		if (!hasExtensionContext()) {
+			console.warn(
+				"[Bookmark Processor] Extension context unavailable — refresh this tab after reloading the extension.",
+			);
+			return;
+		}
+		if (isArticlePage()) {
+			startArticlePageCapture();
+			return;
+		}
+		if (!isCapturePage()) return;
+		registerMessageListener();
+		void startCapture();
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		console.warn("[Bookmark Processor] Failed to start:", msg);
+	}
+}
+
+boot();

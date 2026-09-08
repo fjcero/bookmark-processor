@@ -31,6 +31,69 @@
           "user_mentions": [{ "screen_name": "linear" }]
         }
       }
+    },
+    "1111111111111111111": {
+      "__typename": "Tweet",
+      "rest_id": "1111111111111111111",
+      "core": {
+        "user_results": {
+          "result": {
+            "__typename": "User",
+            "rest_id": "14196511",
+            "core": { "name": "Karri Saarinen", "screen_name": "karrisaarinen" }
+          }
+        }
+      },
+      "legacy": {
+        "created_at": "Sun Sep 06 12:00:00 +0000 2026",
+        "full_text": "https://t.co/article",
+        "user_id_str": "14196511",
+        "entities": {
+          "urls": [{ "expanded_url": "https://x.com/i/article/2222222222222222222" }]
+        }
+      },
+      "article": {
+        "article_results": {
+          "result": {
+            "rest_id": "2222222222222222222",
+            "title": "Why agents need documents",
+            "preview_text": "A short preview of the article body."
+          }
+        }
+      }
+    },
+    "3333333333333333333": {
+      "__typename": "Tweet",
+      "rest_id": "3333333333333333333",
+      "core": {
+        "user_results": {
+          "result": {
+            "__typename": "User",
+            "rest_id": "14196511",
+            "core": { "name": "Karri Saarinen", "screen_name": "karrisaarinen" }
+          }
+        }
+      },
+      "legacy": {
+        "created_at": "Sun Sep 06 13:00:00 +0000 2026",
+        "full_text": "https://t.co/article2",
+        "user_id_str": "14196511"
+      },
+      "article": {
+        "article_results": {
+          "result": {
+            "rest_id": "4444444444444444444",
+            "title": "Hydrated article",
+            "preview_text": "Preview for the hydrated article.",
+            "content_state": {
+              "blocks": [
+                { "type": "unstyled", "text": "First paragraph of the full article." },
+                { "type": "unstyled", "text": "Second paragraph with more detail." }
+              ]
+            }
+          }
+        }
+      }
     }
   },
   "responses": []

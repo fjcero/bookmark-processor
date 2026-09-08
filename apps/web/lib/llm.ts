@@ -8,15 +8,40 @@ import {
 
 export const DEFAULT_MODEL = 'claude-haiku-4-5'
 
+export const PROCESS_MODELS = [
+  { id: 'haiku', label: 'Haiku', model: 'claude-haiku-4-5' },
+  { id: 'sonnet', label: 'Sonnet', model: 'claude-sonnet-4-5' },
+  { id: 'opus', label: 'Opus', model: 'claude-opus-4-6' },
+] as const
+
+export type ProcessModelId = (typeof PROCESS_MODELS)[number]['id']
+
+let activeModel = DEFAULT_MODEL
+
+export function setActiveModel(modelId: ProcessModelId | string): string {
+  const match = PROCESS_MODELS.find((entry) => entry.id === modelId || entry.model === modelId)
+  activeModel = match?.model ?? DEFAULT_MODEL
+  return activeModel
+}
+
+export function resolveModelName(modelId?: string): string {
+  if (!modelId) return activeModel
+  return (
+    PROCESS_MODELS.find((entry) => entry.id === modelId || entry.model === modelId)?.model ??
+    activeModel
+  )
+}
+
 export async function completePrompt(
   prompt: string,
-  options: { maxTokens?: number; timeoutMs?: number } = {},
+  options: { maxTokens?: number; timeoutMs?: number; model?: string } = {},
 ): Promise<string> {
   const { maxTokens = 4096, timeoutMs = 90_000 } = options
+  const model = resolveModelName(options.model)
 
   if (await getCliAvailability()) {
     const result = await claudePrompt(prompt, {
-      model: modelNameToCliAlias(DEFAULT_MODEL),
+      model: modelNameToCliAlias(model),
       timeoutMs,
     })
     if (result.success && result.data) return result.data
@@ -32,7 +57,7 @@ export async function completePrompt(
   }
 
   const response = await client.messages.create({
-    model: DEFAULT_MODEL,
+    model,
     max_tokens: maxTokens,
     messages: [{ role: 'user', content: prompt }],
   })

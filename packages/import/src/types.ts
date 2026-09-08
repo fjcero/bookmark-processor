@@ -1,4 +1,7 @@
-export type ExportSource = 'bookmark' | 'like'
+export type ItemKind = 'bookmark' | 'like' | 'history'
+export type ExportSource = ItemKind
+
+export const X_SOURCE = 'x'
 
 export interface ExportV2 {
   exportVersion: 2
@@ -12,9 +15,9 @@ export interface ExportV2 {
 }
 
 export interface ParsedExport {
-  meta: { exportVersion: 2; source: ExportSource; exportedAt: string }
+  meta: { exportVersion: 2; kind: ItemKind; exportedAt: string }
   users: NormalizedUser[]
-  tweets: NormalizedTweet[]
+  items: NormalizedItem[]
   responses: unknown[]
 }
 
@@ -23,15 +26,21 @@ export interface NormalizedUser {
   handle: string
   name: string
   avatarUrl: string | null
-  rawJson: string
 }
 
-export interface NormalizedTweet {
+export type ContentType = 'post' | 'article'
+export type PostFormat = 'original' | 'reply' | 'quote' | 'repost' | 'thread'
+
+export interface NormalizedItem {
   id: string
   authorId: string
   text: string
   createdAt: Date | null
-  source: ExportSource
+  source: string
+  kind: ItemKind
+  contentType: ContentType
+  url: string | null
+  sortIndex: string | null
   rawJson: string
 }
 
@@ -73,7 +82,27 @@ export interface GraphQLTweet {
   note_tweet?: { note_tweet_results?: { result?: { text?: string } } }
   article?: {
     article_results?: {
-      result?: { title?: string; content?: string }
+      result?: GraphQLArticleResult
     }
   }
+}
+
+export interface GraphQLArticleResult {
+  id?: string
+  rest_id?: string
+  title?: string
+  preview_text?: string
+  summary_text?: string
+  content?: string
+  plain_text?: string
+  plaintext?: string
+  content_state?: {
+    blocks?: Array<{ text?: string; type?: string }>
+    entityMap?: unknown
+  }
+  cover_media?: { media_info?: { original_img_url?: string } }
+  media_entities?: Array<{ media_info?: { original_img_url?: string } }>
+  metadata?: { first_published_at_secs?: number }
+  extracted_html?: string
+  hydration_source?: "graphql" | "html"
 }

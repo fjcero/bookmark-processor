@@ -1,0 +1,283 @@
+import { and, eq, inArray, sql } from "drizzle-orm";
+import {
+	articlePlainText,
+	articleResultFromTweet,
+	articleRestId,
+	articleUrl,
+	findHydratedArticleResult,
+	hasArticleBody,
+	hasFullArticleBody,
+	isRicherArticlePayload,
+	mergeArticleIntoTweet,
+	parseExportV2,
+	compareSortIndex,
+} from "@repo/import";
+import { db, imports, itemCategories, items, users } from "@repo/db";
+import { createId } from "@/lib/ids";
+
+export interface ImportResult {
+	filename: string;
+	parsed: { users: number; items: number };
+	users: { imported: number; skipped: number };
+	items: { imported: number; skipped: number };
+	error?: string;
+}
+
+export async function importExportJson(
+	text: string,
+	filename: string,
+	now = new Date(),
+): Promise<ImportResult> {
+	let parsed;
+	try {
+		parsed = parseExportV2(text);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : "Failed to parse export";
+		return {
+			filename,
+			parsed: { users: 0, items: 0 },
+			users: { imported: 0, skipped: 0 },
+			items: { imported: 0, skipped: 0 },
+			error: msg,
+		};
+	}
+
+	const userIds = parsed.users.map((u) => u.id);
+	const existingUsers =
+		userIds.length > 0
+			? await db
+					.select({ id: users.id })
+					.from(users)
+					.where(inArray(users.id, userIds))
+			: [];
+	const existingUserIds = new Set(existingUsers.map((u) => u.id));
+
+	if (parsed.users.length > 0) {
+		const CHUNK = 200;
+		for (let i = 0; i < parsed.users.length; i += CHUNK) {
+			const slice = parsed.users.slice(i, i + CHUNK);
+			await db
+				.insert(users)
+				.values(
+					slice.map((u) => ({
+						id: u.id,
+						handle: u.handle,
+						name: u.name,
+						avatarUrl: u.avatarUrl,
+						updatedAt: now,
+					})),
+				)
+				.onConflictDoUpdate({
+					target: users.id,
+					set: {
+						handle: sql`excluded.handle`,
+						name: sql`excluded.name`,
+						avatarUrl: sql`excluded.avatar_url`,
+						updatedAt: now,
+					},
+				});
+		}
+	}
+
+	const externalIds = parsed.items.map((t) => t.id);
+	const source = parsed.items[0]?.source ?? "x";
+	const existingItems =
+		externalIds.length > 0
+			? await db
+					.select({
+						externalId: items.externalId,
+						kind: items.kind,
+						rawJson: items.rawJson,
+						sortIndex: items.sortIndex,
+						hydrateRequestedAt: items.hydrateRequestedAt,
+					})
+					.from(items)
+					.where(
+						and(
+							eq(items.source, source),
+							inArray(items.externalId, externalIds),
+						),
+					)
+			: [];
+	const existingByExternalId = new Map(
+		existingItems.map((i) => [i.externalId, i]),
+	);
+
+	const newItems = parsed.items.filter((t) => !existingByExternalId.has(t.id));
+	const kindUpdates = parsed.items.filter((t) => {
+		const existing = existingByExternalId.get(t.id);
+		return existing != null && existing.kind !== t.kind;
+	});
+	const articleUpdates = parsed.items.filter((t) => {
+		const existing = existingByExternalId.get(t.id);
+		if (!existing) return false;
+		try {
+			return isRicherArticlePayload(
+				JSON.parse(t.rawJson),
+				JSON.parse(existing.rawJson),
+			);
+		} catch {
+			return false;
+		}
+	});
+
+	if (newItems.length > 0) {
+		const CHUNK = 200;
+		for (let i = 0; i < newItems.length; i += CHUNK) {
+			const slice = newItems.slice(i, i + CHUNK);
+			await db
+				.insert(items)
+				.values(
+					slice.map((t) => ({
+						id: createId(),
+						source: t.source,
+						externalId: t.id,
+						authorId: t.authorId,
+						text: t.text,
+						publishedAt: t.createdAt,
+						kind: t.kind,
+						contentType: t.contentType,
+						url: t.url,
+						sortIndex: t.sortIndex,
+						rawJson: t.rawJson,
+						importedAt: now,
+					})),
+				)
+				.onConflictDoNothing({ target: [items.source, items.externalId] });
+		}
+	}
+
+	const sortIndexUpdates = parsed.items.filter((t) => {
+		const existing = existingByExternalId.get(t.id);
+		if (!existing || t.sortIndex == null) return false;
+		if (existing.sortIndex == null) return true;
+		return compareSortIndex(t.sortIndex, existing.sortIndex) > 0;
+	});
+
+	for (const item of sortIndexUpdates) {
+		await db
+			.update(items)
+			.set({ sortIndex: item.sortIndex })
+			.where(
+				and(eq(items.source, source), eq(items.externalId, item.id)),
+			);
+	}
+
+	for (const item of kindUpdates) {
+		await db
+			.update(items)
+			.set({ kind: item.kind, importedAt: now })
+			.where(
+				and(eq(items.source, source), eq(items.externalId, item.id)),
+			);
+	}
+
+	const fullArticleUpdateIds: string[] = [];
+	for (const item of articleUpdates) {
+		const existing = existingByExternalId.get(item.id);
+		if (!existing) continue;
+		let existingTweet: unknown;
+		let incomingTweet: unknown;
+		try {
+			existingTweet = JSON.parse(existing.rawJson);
+			incomingTweet = JSON.parse(item.rawJson);
+		} catch {
+			continue;
+		}
+		const incomingArticle =
+			articleResultFromTweet(incomingTweet) ??
+			findHydratedArticleResult(incomingTweet);
+		if (!incomingArticle || !hasArticleBody(incomingArticle)) continue;
+		const merged = mergeArticleIntoTweet(existingTweet, incomingArticle);
+		const mergedArticle =
+			articleResultFromTweet(merged) ?? incomingArticle;
+		const articleId = articleRestId(mergedArticle);
+		const full = hasFullArticleBody(mergedArticle);
+		if (full) fullArticleUpdateIds.push(item.id);
+		await db
+			.update(items)
+			.set({
+				rawJson: JSON.stringify(merged),
+				text: articlePlainText(mergedArticle),
+				contentType: "article",
+				url: articleId ? articleUrl(articleId) : item.url,
+				hydrateRequestedAt: full ? null : existing.hydrateRequestedAt,
+				captureUnavailableAt: null,
+				...(full
+					? {
+							entities: null,
+							understanding: null,
+							categorizedAt: null,
+						}
+					: {}),
+				importedAt: now,
+			})
+			.where(and(eq(items.source, source), eq(items.externalId, item.id)));
+	}
+
+	const refetchIds = parsed.items
+		.filter((item) => {
+			if (existingByExternalId.get(item.id)?.hydrateRequestedAt == null) {
+				return false;
+			}
+			try {
+				const incoming = JSON.parse(item.rawJson) as unknown;
+				const article =
+					articleResultFromTweet(incoming) ??
+					findHydratedArticleResult(incoming);
+				return article != null && hasFullArticleBody(article);
+			} catch {
+				return false;
+			}
+		})
+		.map((item) => item.id);
+	if (refetchIds.length > 0) {
+		await db
+			.update(items)
+			.set({ hydrateRequestedAt: null })
+			.where(
+				and(eq(items.source, source), inArray(items.externalId, refetchIds)),
+			);
+	}
+
+	if (fullArticleUpdateIds.length > 0) {
+		const rows = await db
+			.select({ id: items.id })
+			.from(items)
+			.where(
+				and(
+					eq(items.source, source),
+					inArray(items.externalId, fullArticleUpdateIds),
+				),
+			);
+		const ids = rows.map((row) => row.id);
+		if (ids.length > 0) {
+			await db.delete(itemCategories).where(inArray(itemCategories.itemId, ids));
+		}
+	}
+
+	const usersImported = parsed.users.filter(
+		(u) => !existingUserIds.has(u.id),
+	).length;
+	const usersSkipped = parsed.users.length - usersImported;
+	const articleUpdatedIds = new Set(articleUpdates.map((item) => item.id));
+	const kindOnly = kindUpdates.filter((item) => !articleUpdatedIds.has(item.id));
+	const itemsImported = newItems.length + kindOnly.length + articleUpdates.length;
+	const itemsSkipped = parsed.items.length - itemsImported;
+
+	await db.insert(imports).values({
+		id: createId(),
+		filename,
+		usersImported,
+		itemsImported,
+		usersSkipped,
+		itemsSkipped,
+	});
+
+	return {
+		filename,
+		parsed: { users: parsed.users.length, items: parsed.items.length },
+		users: { imported: usersImported, skipped: usersSkipped },
+		items: { imported: itemsImported, skipped: itemsSkipped },
+	};
+}

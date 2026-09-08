@@ -1,26 +1,27 @@
+import {
+  articlePlainText,
+  articleRestId,
+  articleResultFromTweet,
+  articleUrl,
+  contentTypeOfTweet,
+} from './article'
+import { collectSortIndexes, compareSortIndex, sortIndexFromTweet } from './sort-index'
 import type {
   ExportSource,
   ExportV2,
   GraphQLTweet,
   GraphQLUser,
-  NormalizedTweet,
+  NormalizedItem,
   NormalizedUser,
   ParsedExport,
 } from './types'
+import { X_SOURCE } from './types'
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     return value as Record<string, unknown>
   }
   return null
-}
-
-function jsonSize(value: unknown): number {
-  try {
-    return JSON.stringify(value).length
-  } catch {
-    return 0
-  }
 }
 
 function unwrapTweet(tweet: GraphQLTweet | undefined | null): GraphQLTweet | null {
@@ -66,22 +67,53 @@ function isUserObject(value: unknown): value is GraphQLUser {
 }
 
 function tweetFullText(tweet: GraphQLTweet): string {
+  const article = articleResultFromTweet(tweet)
+  if (article) return articlePlainText(article)
   const note = tweet.note_tweet?.note_tweet_results?.result?.text
   if (note) return note
-  const article = tweet.article?.article_results?.result
-  if (article) {
-    const parts: string[] = []
-    if (article.title) parts.push(article.title)
-    if (article.content) parts.push(article.content)
-    if (parts.length > 0) return parts.join('\n\n')
-  }
   return tweet.legacy?.full_text ?? ''
 }
 
-function parseTwitterDate(value: string | undefined): Date | null {
+function parseDate(value: string | undefined): Date | null {
   if (!value) return null
   const parsed = new Date(value)
   return Number.isNaN(parsed.getTime()) ? null : parsed
+}
+
+function originUrl(handle: string | undefined, restId: string): string {
+  return handle ? `https://x.com/${handle}/status/${restId}` : `https://x.com/i/status/${restId}`
+}
+
+function normalizeItem(
+  tweet: GraphQLTweet,
+  mapKey: string,
+  kind: ExportSource,
+): NormalizedItem | null {
+  const unwrapped = unwrapTweet(tweet)
+  if (!unwrapped) return null
+  const id = unwrapped.rest_id ?? mapKey
+  if (!id) return null
+
+  const embeddedUser = unwrapped.core?.user_results?.result
+  const authorId = embeddedUser?.rest_id ?? unwrapped.legacy?.user_id_str
+  if (!authorId) return null
+  const handle = embeddedUser?.core?.screen_name ?? embeddedUser?.legacy?.screen_name
+  const article = articleResultFromTweet(unwrapped)
+  const articleId = articleRestId(article)
+  const contentType = contentTypeOfTweet(unwrapped)
+
+  return {
+    id,
+    authorId,
+    text: tweetFullText(unwrapped),
+    createdAt: parseDate(unwrapped.legacy?.created_at),
+    source: X_SOURCE,
+    kind,
+    contentType,
+    url: articleId ? articleUrl(articleId) : originUrl(handle, id),
+    sortIndex: sortIndexFromTweet(unwrapped),
+    rawJson: JSON.stringify(unwrapped),
+  }
 }
 
 function normalizeUser(user: GraphQLUser): NormalizedUser | null {
@@ -96,43 +128,22 @@ function normalizeUser(user: GraphQLUser): NormalizedUser | null {
     handle,
     name: name || handle || id,
     avatarUrl,
-    rawJson: JSON.stringify(user),
   }
+}
+
+function userRichness(user: NormalizedUser): number {
+  return (user.handle ? 1 : 0) + (user.name ? 1 : 0) + (user.avatarUrl ? 2 : 0)
 }
 
 function mergeUser(existing: NormalizedUser | undefined, next: NormalizedUser): NormalizedUser {
   if (!existing) return next
-  return jsonSize(JSON.parse(next.rawJson)) >= jsonSize(JSON.parse(existing.rawJson))
-    ? next
-    : existing
+  return userRichness(next) >= userRichness(existing) ? next : existing
 }
 
-function normalizeTweet(
-  tweet: GraphQLTweet,
-  mapKey: string,
-  source: ExportSource,
-): NormalizedTweet | null {
-  const unwrapped = unwrapTweet(tweet)
-  if (!unwrapped) return null
-  const id = unwrapped.rest_id ?? mapKey
-  if (!id) return null
-
-  const embeddedUser = unwrapped.core?.user_results?.result
-  const authorId = embeddedUser?.rest_id ?? unwrapped.legacy?.user_id_str
-  if (!authorId) return null
-
-  return {
-    id,
-    authorId,
-    text: tweetFullText(unwrapped),
-    createdAt: parseTwitterDate(unwrapped.legacy?.created_at),
-    source,
-    rawJson: JSON.stringify(unwrapped),
-  }
-}
-
-function parseSource(value: unknown): ExportSource {
-  return value === 'like' ? 'like' : 'bookmark'
+function parseKind(value: unknown): ExportSource {
+  if (value === 'like') return 'like'
+  if (value === 'history') return 'history'
+  return 'bookmark'
 }
 
 export function parseExportV2(json: string | object): ParsedExport {
@@ -155,9 +166,9 @@ export function parseExportV2(json: string | object): ParsedExport {
   const tweetsMap = asRecord(root.tweets)
   if (!tweetsMap) throw new Error('Export is missing tweets map')
 
-  const source = parseSource(root.source)
+  const kind = parseKind(root.source)
   const usersById = new Map<string, NormalizedUser>()
-  const tweets: NormalizedTweet[] = []
+  const items: NormalizedItem[] = []
 
   for (const [key, value] of Object.entries(tweetsMap)) {
     if (isUserObject(value)) {
@@ -167,9 +178,9 @@ export function parseExportV2(json: string | object): ParsedExport {
     }
 
     if (!isTweetObject(value)) continue
-    const tweet = normalizeTweet(value, key, source)
-    if (!tweet) continue
-    tweets.push(tweet)
+    const item = normalizeItem(value, key, kind)
+    if (!item) continue
+    items.push(item)
 
     const embedded = unwrapTweet(value)?.core?.user_results?.result
     if (embedded && isUserObject(embedded)) {
@@ -179,15 +190,23 @@ export function parseExportV2(json: string | object): ParsedExport {
   }
 
   const exportV2 = root as unknown as ExportV2
+  const sortIndexes = collectSortIndexes(exportV2.responses)
+  for (const item of items) {
+    const fromTimeline = sortIndexes.get(item.id)
+    if (!fromTimeline) continue
+    if (!item.sortIndex || compareSortIndex(fromTimeline, item.sortIndex) > 0) {
+      item.sortIndex = fromTimeline
+    }
+  }
 
   return {
     meta: {
       exportVersion: 2,
-      source,
+      kind,
       exportedAt: typeof exportV2.exportedAt === 'string' ? exportV2.exportedAt : new Date().toISOString(),
     },
     users: Array.from(usersById.values()),
-    tweets,
+    items,
     responses: Array.isArray(exportV2.responses) ? exportV2.responses : [],
   }
 }
