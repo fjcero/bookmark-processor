@@ -34,7 +34,6 @@ export const items = sqliteTable(
 		contentType: text("content_type").notNull().default("post"),
 		url: text("url"),
 		sortIndex: text("sort_index"),
-		rawJson: text("raw_json").notNull(),
 		entities: text("entities"),
 		understanding: text("understanding"),
 		importedAt: integer("imported_at", { mode: "timestamp" })
@@ -58,6 +57,26 @@ export const items = sqliteTable(
 		index("items_sort_index_idx").on(table.sortIndex),
 		index("items_hydrate_requested_at_idx").on(table.hydrateRequestedAt),
 		index("items_capture_unavailable_at_idx").on(table.captureUnavailableAt),
+	],
+);
+
+/**
+ * Capture blob keyed by original platform id (source + tweet rest_id).
+ * No FK to items: deleting or archiving a library row must not drop this.
+ */
+export const itemRaw = sqliteTable(
+	"item_raw",
+	{
+		source: text("source").notNull(),
+		externalId: text("external_id").notNull(),
+		payload: text("payload").notNull(),
+		payloadBytes: integer("payload_bytes").notNull(),
+		updatedAt: integer("updated_at", { mode: "timestamp" })
+			.notNull()
+			.$defaultFn(() => new Date()),
+	},
+	(table) => [
+		primaryKey({ columns: [table.source, table.externalId] }),
 	],
 );
 
@@ -136,6 +155,17 @@ export const usersRelations = relations(users, ({ many }) => ({
 export const itemsRelations = relations(items, ({ one, many }) => ({
 	author: one(users, { fields: [items.authorId], references: [users.id] }),
 	categories: many(itemCategories),
+	raw: one(itemRaw, {
+		fields: [items.source, items.externalId],
+		references: [itemRaw.source, itemRaw.externalId],
+	}),
+}));
+
+export const itemRawRelations = relations(itemRaw, ({ one }) => ({
+	item: one(items, {
+		fields: [itemRaw.source, itemRaw.externalId],
+		references: [items.source, items.externalId],
+	}),
 }));
 
 export const categoriesRelations = relations(categories, ({ many }) => ({
@@ -153,6 +183,7 @@ export const itemCategoriesRelations = relations(itemCategories, ({ one }) => ({
 export const schema = {
 	users,
 	items,
+	itemRaw,
 	categories,
 	itemCategories,
 	imports,

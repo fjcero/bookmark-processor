@@ -171,6 +171,15 @@ export function stampArticleRaw(tweet: unknown, raw: unknown): Record<string, un
   return base
 }
 
+/** INVARIANT: never throw away `_articleRaw`. It is the expensive GraphQL body. */
+export function keepArticleRaw(incoming: unknown, existing: unknown): unknown {
+  const incomingRaw = articleRawFrom(incoming)
+  if (incomingRaw != null) return incoming
+  const existingRaw = articleRawFrom(existing)
+  if (existingRaw == null) return incoming
+  return stampArticleRaw(incoming, existingRaw)
+}
+
 /** True only when the body is substantially longer than the bookmark preview. */
 export function hasFullArticleBody(result: unknown): boolean {
   const article = articleResultFromUnknown(result) ?? articleResultFromTweet(result)

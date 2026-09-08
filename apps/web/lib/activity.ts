@@ -1,8 +1,7 @@
-import { and, count, gte, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, count, gte, isNotNull, sql } from "drizzle-orm";
 import { db, items } from "@repo/db";
 import type { ActivityDay, ActivitySeries } from "./activity-types";
-
-const listed = isNull(items.archivedAt);
+import { notArchived } from "./item-scope";
 const DAYS = 371;
 
 function startOfRange(): Date {
@@ -55,7 +54,7 @@ async function countsByPublishedAt(start: Date): Promise<Map<string, number>> {
 		})
 		.from(items)
 		.where(
-			and(listed, isNotNull(items.publishedAt), gte(items.publishedAt, start)),
+			and(notArchived, isNotNull(items.publishedAt), gte(items.publishedAt, start)),
 		)
 		.groupBy(sql`date(${items.publishedAt}, 'unixepoch', 'localtime')`);
 
@@ -72,7 +71,7 @@ async function countsByBookmarkedAt(start: Date): Promise<Map<string, number>> {
 			n: count(),
 		})
 		.from(items)
-		.where(and(listed, gte(items.importedAt, start)))
+		.where(and(notArchived, gte(items.importedAt, start)))
 		.groupBy(sql`date(${items.importedAt}, 'unixepoch', 'localtime')`);
 
 	return fillCounts(map, rows);

@@ -39,6 +39,27 @@ test("scores quote payloads higher than stubs", () => {
 	assert.equal(isRicherTweetPayload(withQuote, withQuote), false);
 });
 
+test("never treats a tweet without _articleRaw as richer than one that has it", () => {
+	const hydrated = {
+		__typename: "Tweet",
+		rest_id: "1",
+		legacy: { full_text: "short" },
+		_articleRaw: { data: { article: { title: "full body captured from X" } } },
+	};
+	const quoted = {
+		__typename: "Tweet",
+		rest_id: "1",
+		legacy: {
+			full_text: "x".repeat(500),
+			quoted_status_id_str: "2",
+		},
+		quoted_status_result: {
+			result: { __typename: "Tweet", rest_id: "2", legacy: { full_text: "q" } },
+		},
+	};
+	assert.equal(isRicherTweetPayload(quoted, hydrated), false);
+});
+
 test("treats substantially longer text as richer", () => {
 	const short = { legacy: { full_text: "hi" } };
 	const long = {

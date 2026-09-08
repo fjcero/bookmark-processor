@@ -26,7 +26,7 @@ Load `apps/extension/dist` in Chrome → `chrome://extensions` → Developer mod
 
 1. Set **Server URL** in the popup (default `http://localhost:3000`).
 2. Choose **Send to server** or **Download JSON**.
-3. Open [x.com/i/bookmarks](https://x.com/i/bookmarks), your likes page, or [x.com/i/history](https://x.com/i/history).
+3. Open [x.com/i/bookmarks](https://x.com/i/bookmarks) or your likes page. History capture is off unless you enable it in the popup.
 4. Capture starts automatically. Use **Auto-scroll**, then **Export**.
 
 The server receives v2 JSON at `POST /api/import/capture` (CORS-enabled for x.com and `chrome-extension://` origins).

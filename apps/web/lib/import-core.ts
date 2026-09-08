@@ -14,9 +14,17 @@ import {
 	parseExportV2,
 	compareSortIndex,
 	stampArticleRaw,
+	keepArticleRaw,
+	shouldPromoteKind,
+	type ItemKind,
 } from "@repo/import";
 import { db, imports, items, users } from "@repo/db";
 import { createId } from "@/lib/ids";
+import {
+	getItemRaws,
+	upsertItemRaw,
+	upsertItemRaws,
+} from "@/lib/item-raw";
 import {
 	markImportQueueImporting,
 	resolveImportQueueForExternalIds,
@@ -97,7 +105,6 @@ export async function importExportJson(
 					.select({
 						externalId: items.externalId,
 						kind: items.kind,
-						rawJson: items.rawJson,
 						sortIndex: items.sortIndex,
 						hydrateRequestedAt: items.hydrateRequestedAt,
 					})
@@ -109,8 +116,15 @@ export async function importExportJson(
 						),
 					)
 			: [];
+	const existingRawByExternalId = await getItemRaws(source, externalIds);
 	const existingByExternalId = new Map(
-		existingItems.map((i) => [i.externalId, i]),
+		existingItems.map((i) => [
+			i.externalId,
+			{
+				...i,
+				rawJson: existingRawByExternalId.get(i.externalId) ?? "",
+			},
+		]),
 	);
 
 	const newItems = parsed.items.filter(
@@ -118,7 +132,8 @@ export async function importExportJson(
 	);
 	const kindUpdates = parsed.items.filter((t) => {
 		const existing = existingByExternalId.get(t.id);
-		return existing != null && existing.kind !== t.kind;
+		if (!existing) return false;
+		return shouldPromoteKind(existing.kind as ItemKind, t.kind);
 	});
 	const articleUpdates = parsed.items.filter((t) => {
 		const existing = existingByExternalId.get(t.id);
@@ -165,11 +180,15 @@ export async function importExportJson(
 						contentType: t.contentType,
 						url: t.url,
 						sortIndex: t.sortIndex,
-						rawJson: t.rawJson,
 						importedAt: now,
 					})),
 				)
 				.onConflictDoNothing({ target: [items.source, items.externalId] });
+			await upsertItemRaws(
+				source,
+				slice.map((t) => ({ externalId: t.id, payload: t.rawJson })),
+				now,
+			);
 		}
 	}
 
@@ -199,13 +218,44 @@ export async function importExportJson(
 	}
 
 	for (const item of richerTweetUpdates) {
+		const existing = existingByExternalId.get(item.id);
+		const incomingTweet = (() => {
+			try {
+				return JSON.parse(item.rawJson) as unknown;
+			} catch {
+				return null;
+			}
+		})();
+		const existingTweet = (() => {
+			try {
+				return existing ? JSON.parse(existing.rawJson) : null;
+			} catch {
+				return null;
+			}
+		})();
+		const mergedTweet =
+			incomingTweet != null
+				? keepArticleRaw(incomingTweet, existingTweet)
+				: incomingTweet;
+		if (mergedTweet != null) {
+			await upsertItemRaw(
+				source,
+				item.id,
+				JSON.stringify(mergedTweet),
+				now,
+			);
+		}
 		await db
 			.update(items)
 			.set({
-				rawJson: item.rawJson,
 				text: item.text,
 				publishedAt: item.createdAt,
-				kind: item.kind,
+				kind: shouldPromoteKind(
+					existingByExternalId.get(item.id)?.kind as ItemKind,
+					item.kind,
+				)
+					? item.kind
+					: (existingByExternalId.get(item.id)?.kind as ItemKind),
 				contentType: item.contentType,
 				url: item.url,
 				sortIndex: item.sortIndex ?? existingByExternalId.get(item.id)?.sortIndex,
@@ -251,10 +301,10 @@ export async function importExportJson(
 		const full = hasFullArticleBody(
 			mergedArticle ?? findHydratedArticleResult(merged),
 		);
+		await upsertItemRaw(source, item.id, JSON.stringify(merged), now);
 		await db
 			.update(items)
 			.set({
-				rawJson: JSON.stringify(merged),
 				text: mergedArticle
 					? articlePlainText(mergedArticle)
 					: item.text,

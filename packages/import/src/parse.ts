@@ -21,6 +21,7 @@ import type {
   ParsedExport,
 } from './types.ts'
 import { X_SOURCE } from './types.ts'
+import { resolveItemKind } from './capture-source.ts'
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -156,9 +157,7 @@ function mergeUser(existing: NormalizedUser | undefined, next: NormalizedUser): 
 }
 
 function parseKind(value: unknown): ExportSource {
-  if (value === 'like') return 'like'
-  if (value === 'history') return 'history'
-  return 'bookmark'
+  return resolveItemKind(value)
 }
 
 function applyArticleBodiesFromResponses(

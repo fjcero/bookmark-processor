@@ -1,5 +1,5 @@
-import type { ExportPayload } from "@repo/import/capture/engine";
-import { fetchServerTotal } from "@repo/import/capture/engine";
+import type { ExportPayload, LibraryStats } from "@repo/import/capture/engine";
+import { fetchLibraryStats } from "@repo/import/capture/engine";
 import {
 	enqueueImportPayload,
 	processNextImport,
@@ -18,6 +18,6 @@ export function registerImportHandlers(router: MessageRouter): void {
 		return progress;
 	});
 	router.register("bp-fetch-total", async (message) => {
-		return { total: await fetchServerTotal(String(message.serverUrl)) };
+		return await fetchLibraryStats(String(message.serverUrl));
 	});
 }

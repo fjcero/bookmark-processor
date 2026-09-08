@@ -4,6 +4,7 @@ import {
 	type ExportPayload,
 } from "@repo/import/capture/engine";
 import type { ImportWorkerProgress } from "@repo/import";
+import { isImportableTweet } from "@repo/import";
 import { broadcastToTabs } from "./broadcast";
 import { CAPTURE_KEY } from "./constants";
 import {
@@ -142,7 +143,7 @@ export async function enqueueImportPayload(
 	const queued = new Set(state.queue.map((entry) => entry.externalId));
 	const added: ImportWorkerEntry[] = [];
 	for (const [externalId, tweet] of Object.entries(payload.tweets)) {
-		if (queued.has(externalId)) continue;
+		if (queued.has(externalId) || !isImportableTweet(tweet)) continue;
 		const entry: ImportWorkerEntry = {
 			externalId,
 			payload: singleTweetPayload(payload, externalId, tweet),
@@ -156,7 +157,7 @@ export async function enqueueImportPayload(
 	}
 	await idbPutManyToStore(IMPORT_QUEUE_STORE, added);
 	if (state.queue.length > 0) {
-		await scheduleNext(Date.now() + RETRY_MS);
+		await scheduleNext(Date.now());
 	}
 	return state;
 }
@@ -292,8 +293,8 @@ async function processOneBatch(): Promise<{
 			throw new Error("Server did not account for the queued tweets");
 		}
 		if (accounted !== batch.length) {
-			throw new Error(
-				`Server accounted for ${accounted} of ${batch.length} queued tweets`,
+			console.warn(
+				`[import-worker] Server accounted for ${accounted} of ${batch.length} queued tweets`,
 			);
 		}
 
@@ -312,6 +313,8 @@ async function processOneBatch(): Promise<{
 			importedDelta: result.imported,
 			skippedDelta: result.skipped,
 			libraryTotal: result.total,
+			libraryPosts: result.posts,
+			libraryArticles: result.articles,
 		});
 		notifyProgress(progress);
 		if (state.queue.length > 0) {
@@ -348,16 +351,35 @@ async function processOneBatch(): Promise<{
  * Uses chrome.alarms for wakeups — no setTimeout.
  */
 export async function processNextImport(): Promise<ImportWorkerProgress> {
-	let progress = progressOf(await loadImportWorkerState());
+	const deltas: Partial<ImportWorkerProgress> = {
+		completedIds: [],
+		importedDelta: 0,
+		skippedDelta: 0,
+	};
 	for (;;) {
 		const step = await processOneBatch();
-		progress = step.progress;
-		if (!step.didWork) break;
+		const { progress } = step;
+		if (progress.completedIds?.length) {
+			deltas.completedIds!.push(...progress.completedIds);
+		}
+		deltas.importedDelta! += progress.importedDelta ?? 0;
+		deltas.skippedDelta! += progress.skippedDelta ?? 0;
+		if (progress.libraryTotal != null) {
+			deltas.libraryTotal = progress.libraryTotal;
+		}
+		if (progress.libraryPosts != null) {
+			deltas.libraryPosts = progress.libraryPosts;
+		}
+		if (progress.libraryArticles != null) {
+			deltas.libraryArticles = progress.libraryArticles;
+		}
+		if (!step.didWork) {
+			return progressOf(await loadImportWorkerState(), deltas);
+		}
 		if (readyEntries((await loadImportWorkerState()).queue).length === 0) {
-			break;
+			return progressOf(await loadImportWorkerState(), deltas);
 		}
 	}
-	return progress;
 }
 
 export function importWorkerProgress(

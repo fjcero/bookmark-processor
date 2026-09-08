@@ -13,7 +13,7 @@
   "scripts": {
     "build": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test src/article.test.ts src/article-content.test.ts src/article-html.test.ts src/article-request.test.ts src/article-queue.test.ts src/sort-index.test.ts src/parse.test.ts src/tweet-richness.test.ts"
+    "test": "node --experimental-strip-types --test src/article.test.ts src/article-content.test.ts src/article-html.test.ts src/article-request.test.ts src/article-queue.test.ts src/sort-index.test.ts src/parse.test.ts src/tweet-richness.test.ts src/raw-upgrade.test.ts"
   },
   "devDependencies": {
     "typescript": "^5.9.2"

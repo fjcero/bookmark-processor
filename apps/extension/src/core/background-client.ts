@@ -2,6 +2,7 @@ import type {
 	CaptureState,
 	CaptureStorage,
 	ExportPayload,
+	LibraryStats,
 } from "@repo/import/capture/engine";
 import type { ImportWorkerProgress } from "@repo/import";
 
@@ -54,12 +55,23 @@ export function enqueueImportsInBackground(
 	});
 }
 
+export async function fetchLibraryStatsInBackground(
+	serverUrl: string,
+): Promise<LibraryStats | null> {
+	try {
+		return await request<LibraryStats>({
+			type: "bp-fetch-total",
+			serverUrl,
+		});
+	} catch {
+		return null;
+	}
+}
+
+/** @deprecated Use fetchLibraryStatsInBackground */
 export async function fetchTotalInBackground(
 	serverUrl: string,
 ): Promise<number | null> {
-	const result = await request<{ total: number | null }>({
-		type: "bp-fetch-total",
-		serverUrl,
-	});
-	return result.total;
+	const stats = await fetchLibraryStatsInBackground(serverUrl);
+	return stats?.total ?? null;
 }

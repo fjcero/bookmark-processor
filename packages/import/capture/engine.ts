@@ -1,7 +1,12 @@
 /**
- * Browser capture engine for X bookmark/likes export v2.
+ * Browser capture engine for X bookmarks, likes, and own replies/quotes.
  * Shared by bookmarklet, console script, and Chrome extension.
  */
+
+import {
+	captureLabel,
+	captureSourceFromPath,
+} from "../src/capture-source.ts";
 
 import {
 	CAPTURE_EVENT,
@@ -9,6 +14,7 @@ import {
 	type CaptureEventDetail,
 } from "./hooks-events";
 import {
+	articleRawFrom,
 	findHydratedArticleResult,
 	hasFullArticleBody,
 	isRicherArticlePayload,
@@ -28,7 +34,7 @@ export interface CaptureResponse {
 }
 
 export interface CaptureState {
-	source: "bookmark" | "like" | "history";
+	source: "bookmark" | "like" | "own";
 	tweets: Record<string, unknown>;
 	responses: CaptureResponse[];
 	seen: string[];
@@ -57,7 +63,7 @@ export interface CaptureEngineOptions {
 export interface ExportPayload {
 	exportVersion: 2;
 	exportedAt: string;
-	source: "bookmark" | "like" | "history";
+	source: "bookmark" | "like" | "own";
 	origin: string;
 	page: { url: string; pathname: string };
 	stats: { tweetCount: number; responseCount: number };
@@ -87,7 +93,7 @@ export function createLocalStorageAdapter(): CaptureStorage {
 }
 
 export class CaptureEngine {
-	readonly source: "bookmark" | "like" | "history";
+	readonly source: "bookmark" | "like" | "own";
 	readonly label: string;
 	private tweets: Record<string, unknown>;
 	private responses: CaptureResponse[];
@@ -107,9 +113,6 @@ export class CaptureEngine {
 	private active: boolean;
 
 	constructor(options: CaptureEngineOptions = {}) {
-		const path = location.pathname;
-		const isLikes = path.includes("/likes");
-		const isHistory = path.includes("/history");
 		this.tweets = {};
 		this.responses = [];
 		this.seen = new Set();
@@ -118,8 +121,8 @@ export class CaptureEngine {
 		this.startedAt = new Date().toISOString();
 		this.pageListener = null;
 		this.active = false;
-		this.source = isLikes ? "like" : isHistory ? "history" : "bookmark";
-		this.label = isLikes ? "likes" : isHistory ? "history" : "bookmarks";
+		this.source = captureSourceFromPath(location.pathname);
+		this.label = captureLabel(this.source);
 		this.storage = options.storage;
 		this.onCountChange = options.onCountChange;
 		this.onToast = options.onToast;
@@ -272,7 +275,11 @@ export class CaptureEngine {
 				this.onCountChange?.(this.tweetCount());
 				this.schedulePersist();
 			} else if (isRicherTweetPayload(tweet, existing)) {
-				this.tweets[id] = tweet;
+				const existingRaw = articleRawFrom(existing);
+				this.tweets[id] =
+					existingRaw != null && articleRawFrom(tweet) == null
+						? stampArticleRaw(tweet, existingRaw)
+						: tweet;
 				this.onCountChange?.(this.tweetCount());
 				this.schedulePersist();
 			}
@@ -367,6 +374,8 @@ export async function uploadPayload(
 	imported: number;
 	skipped: number;
 	total: number | null;
+	posts: number | null;
+	articles: number | null;
 	error?: string;
 }> {
 	const base = serverUrl.replace(/\/$/, "");
@@ -379,6 +388,8 @@ export async function uploadPayload(
 		error?: string;
 		items?: { imported: number; skipped: number };
 		total?: number;
+		posts?: number;
+		articles?: number;
 	};
 	if (!res.ok) {
 		throw new Error(data.error ?? `Upload failed (${res.status})`);
@@ -387,18 +398,40 @@ export async function uploadPayload(
 		imported: data.items?.imported ?? 0,
 		skipped: data.items?.skipped ?? 0,
 		total: typeof data.total === "number" ? data.total : null,
+		posts: typeof data.posts === "number" ? data.posts : null,
+		articles: typeof data.articles === "number" ? data.articles : null,
 	};
 }
 
-export async function fetchServerTotal(serverUrl: string): Promise<number> {
+export interface LibraryStats {
+	total: number;
+	posts: number;
+	articles: number;
+}
+
+export async function fetchLibraryStats(serverUrl: string): Promise<LibraryStats> {
 	const base = serverUrl.replace(/\/$/, "");
 	const res = await fetch(`${base}/api/import/capture`);
 	if (!res.ok) throw new Error(`Stats failed (${res.status})`);
-	const data = (await res.json()) as { total?: number };
-	if (typeof data.total !== "number") {
-		throw new Error("Stats response is missing total");
+	const data = (await res.json()) as {
+		total?: number;
+		posts?: number;
+		articles?: number;
+	};
+	if (
+		typeof data.total !== "number" ||
+		typeof data.posts !== "number" ||
+		typeof data.articles !== "number"
+	) {
+		throw new Error("Stats response is missing library counts");
 	}
-	return data.total;
+	return { total: data.total, posts: data.posts, articles: data.articles };
+}
+
+/** @deprecated Use fetchLibraryStats */
+export async function fetchServerTotal(serverUrl: string): Promise<number> {
+	const stats = await fetchLibraryStats(serverUrl);
+	return stats.total;
 }
 
 export async function fetchPendingArticles(

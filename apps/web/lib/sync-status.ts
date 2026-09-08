@@ -1,5 +1,5 @@
 import { and, count, eq, isNotNull, isNull, sql } from "drizzle-orm";
-import { db, items, settings } from "@repo/db";
+import { db, itemRaw, items, settings } from "@repo/db";
 import {
 	articleRestId,
 	articleResultFromTweet,
@@ -11,6 +11,7 @@ import {
 } from "@repo/import";
 import { createId } from "@/lib/ids";
 import { getImportQueueCounts } from "@/lib/import-queue";
+import { listedForKind } from "@/lib/item-scope";
 
 const EXTENSION_STATUS_KEY = "extension.status";
 const REVOCATIONS_KEY = "sync.revocations";
@@ -46,29 +47,35 @@ function parseRevocations(raw: string | undefined): SyncRevocation[] {
 }
 
 export async function getLibrarySyncQueue(): Promise<LibrarySyncQueue> {
-	const listed = isNull(items.archivedAt);
 	const [needingBody] = await db
 		.select({ n: count() })
 		.from(items)
+		.leftJoin(
+			itemRaw,
+			and(
+				eq(itemRaw.source, items.source),
+				eq(itemRaw.externalId, items.externalId),
+			),
+		)
 		.where(
 			and(
-				listed,
+				listedForKind("all"),
 				eq(items.contentType, "article"),
 				isNull(items.captureUnavailableAt),
 				sql`(
-          json_extract(${items.rawJson}, '$.article.article_results.result.content_state.blocks[0].text') IS NULL
-          AND json_extract(${items.rawJson}, '$._articleRaw') IS NULL
+          json_extract(${itemRaw.payload}, '$.article.article_results.result.content_state.blocks[0].text') IS NULL
+          AND json_extract(${itemRaw.payload}, '$._articleRaw') IS NULL
         )`,
 			),
 		);
 	const [refetchQueued] = await db
 		.select({ n: count() })
 		.from(items)
-		.where(and(listed, isNotNull(items.hydrateRequestedAt)));
+		.where(and(listedForKind("all"), isNotNull(items.hydrateRequestedAt)));
 	const [unavailable] = await db
 		.select({ n: count() })
 		.from(items)
-		.where(and(listed, isNotNull(items.captureUnavailableAt)));
+		.where(and(listedForKind("all"), isNotNull(items.captureUnavailableAt)));
 
 	return {
 		articlesNeedingBody: needingBody?.n ?? 0,

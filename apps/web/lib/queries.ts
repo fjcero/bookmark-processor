@@ -9,7 +9,7 @@ import {
 	sql,
 	type SQL,
 } from "drizzle-orm";
-import { categories, db, itemCategories, items, users } from "@repo/db";
+import { categories, db, itemCategories, itemRaw, items, users } from "@repo/db";
 import { articleResultFromTweet } from "@repo/import";
 import {
 	derivePostFormat,
@@ -30,8 +30,7 @@ import {
 	type ItemSearchFilters,
 } from "./item-search";
 import { DEFAULT_ITEM_SORT, type ItemSort } from "./import-prefs";
-
-const listed = isNull(items.archivedAt);
+import { listedForKind, notArchived, type LibraryKindFilter } from "./item-scope";
 
 export interface StageCounts {
 	done: number;
@@ -40,6 +39,7 @@ export interface StageCounts {
 
 export interface BucketStats {
 	total: number;
+	raw: StageCounts;
 	entities: StageCounts;
 	understanding: StageCounts;
 	categorized: StageCounts;
@@ -97,6 +97,7 @@ function asCount(value: unknown): number {
 function emptyBucket(): BucketStats {
 	return {
 		total: 0,
+		raw: { done: 0, pending: 0 },
 		entities: { done: 0, pending: 0 },
 		understanding: { done: 0, pending: 0 },
 		categorized: { done: 0, pending: 0 },
@@ -105,12 +106,14 @@ function emptyBucket(): BucketStats {
 
 function bucketFromCounts(
 	total: number,
+	rawDone: number,
 	entitiesDone: number,
 	understandingDone: number,
 	categorizedDone: number,
 ): BucketStats {
 	return {
 		total,
+		raw: { done: rawDone, pending: total - rawDone },
 		entities: { done: entitiesDone, pending: total - entitiesDone },
 		understanding: {
 			done: understandingDone,
@@ -123,28 +126,46 @@ function bucketFromCounts(
 function mergeBuckets(a: BucketStats, b: BucketStats): BucketStats {
 	return bucketFromCounts(
 		a.total + b.total,
+		a.raw.done + b.raw.done,
 		a.entities.done + b.entities.done,
 		a.understanding.done + b.understanding.done,
 		a.categorized.done + b.categorized.done,
 	);
 }
 
-export async function getStats(): Promise<Stats> {
+export async function getStats(
+	kind: LibraryKindFilter = "all",
+): Promise<Stats> {
+	const archivedWhere =
+		kind === "all"
+			? isNotNull(items.archivedAt)
+			: and(isNotNull(items.archivedAt), eq(items.kind, kind));
 	const [archived] = await db
 		.select({ n: count() })
 		.from(items)
-		.where(isNotNull(items.archivedAt));
-	const [userCount] = await db.select({ n: count() }).from(users);
+		.where(archivedWhere);
+	const [userCount] = await db
+		.select({ n: sql<number>`count(distinct ${items.authorId})` })
+		.from(items)
+		.where(listedForKind(kind));
 	const buckets = await db
 		.select({
 			contentType: items.contentType,
 			n: count(),
+			raw: sql<number>`sum(case when ${items.contentType} != 'article' or json_extract(${itemRaw.payload}, '$._articleRaw') is not null or json_extract(${itemRaw.payload}, '$.article.article_results.result.content_state.blocks[0].text') is not null then 1 else 0 end)`,
 			entities: sql<number>`sum(case when ${items.entities} is not null then 1 else 0 end)`,
 			understanding: sql<number>`sum(case when ${items.understanding} is not null then 1 else 0 end)`,
 			categorized: sql<number>`sum(case when ${items.categorizedAt} is not null then 1 else 0 end)`,
 		})
 		.from(items)
-		.where(listed)
+		.leftJoin(
+			itemRaw,
+			and(
+				eq(itemRaw.source, items.source),
+				eq(itemRaw.externalId, items.externalId),
+			),
+		)
+		.where(listedForKind(kind))
 		.groupBy(items.contentType);
 
 	let posts = emptyBucket();
@@ -152,6 +173,7 @@ export async function getStats(): Promise<Stats> {
 	for (const row of buckets) {
 		const next = bucketFromCounts(
 			asCount(row.n),
+			asCount(row.raw),
 			asCount(row.entities),
 			asCount(row.understanding),
 			asCount(row.categorized),
@@ -162,9 +184,9 @@ export async function getStats(): Promise<Stats> {
 	const all = mergeBuckets(posts, articles);
 
 	return {
-		users: userCount.n,
+		users: asCount(userCount.n),
 		items: all.total,
-		archived: archived.n,
+		archived: asCount(archived.n),
 		posts,
 		articles,
 		entities: all.entities,
@@ -200,7 +222,7 @@ type RawItemRow = {
 	categorizedAt: Date | null;
 	understanding: string | null;
 	entities: string | null;
-	rawJson: string;
+	rawJson: string | null;
 	hydrateRequestedAt: Date | null;
 	handle: string;
 	name: string;
@@ -221,7 +243,7 @@ const itemSelect = {
 	categorizedAt: items.categorizedAt,
 	understanding: items.understanding,
 	entities: items.entities,
-	rawJson: items.rawJson,
+	rawJson: itemRaw.payload,
 	hydrateRequestedAt: items.hydrateRequestedAt,
 	handle: users.handle,
 	name: users.name,
@@ -232,7 +254,7 @@ function listWhere(
 	uncategorized: boolean,
 	search?: ItemSearchFilters,
 ): SQL | undefined {
-	const parts: SQL[] = [listed];
+	const parts: SQL[] = [notArchived];
 	if (uncategorized) parts.push(isNull(items.categorizedAt));
 	const searchWhere = buildItemSearchWhere(search ?? {});
 	if (searchWhere) parts.push(searchWhere);
@@ -278,12 +300,12 @@ function mapItemRows(
 	return rows.map((r) => {
 		let parsed: unknown = null;
 		try {
-			parsed = JSON.parse(r.rawJson);
+			parsed = JSON.parse(r.rawJson ?? "");
 		} catch {
 			parsed = null;
 		}
 		const article =
-			articleResultFromTweet(parsed) ?? findHydratedArticleResult(parsed);
+			findHydratedArticleResult(parsed) ?? articleResultFromTweet(parsed);
 		const contentType = (r.contentType as ContentType) || "post";
 		return {
 			id: r.id,
@@ -306,8 +328,8 @@ function mapItemRows(
 			categorizedAt: r.categorizedAt,
 			understanding: r.understanding,
 			entities: r.entities,
-			mediaUrls: mediaUrlsForItem(r.entities, r.rawJson),
-			embeds: extractEmbeds(r.rawJson, r.source),
+			mediaUrls: mediaUrlsForItem(r.entities, r.rawJson ?? ""),
+			embeds: extractEmbeds(r.rawJson ?? "", r.source),
 			handle: r.handle,
 			name: r.name,
 			avatarUrl: r.avatarUrl,
@@ -344,6 +366,13 @@ export async function listItems({
 		.select(itemSelect)
 		.from(items)
 		.innerJoin(users, eq(items.authorId, users.id))
+		.leftJoin(
+			itemRaw,
+			and(
+				eq(itemRaw.source, items.source),
+				eq(itemRaw.externalId, items.externalId),
+			),
+		)
 		.where(where)
 		.orderBy(...itemOrder(sort));
 
@@ -352,6 +381,13 @@ export async function listItems({
 		.select({ n: count() })
 		.from(items)
 		.innerJoin(users, eq(items.authorId, users.id))
+		.leftJoin(
+			itemRaw,
+			and(
+				eq(itemRaw.source, items.source),
+				eq(itemRaw.externalId, items.externalId),
+			),
+		)
 		.where(where);
 
 	const catsByItem = await loadCategories(rows.map((r) => r.id));
@@ -377,7 +413,14 @@ export async function getItem(id: string): Promise<ItemRow | null> {
 		.select(itemSelect)
 		.from(items)
 		.innerJoin(users, eq(items.authorId, users.id))
-		.where(and(eq(items.id, id), listed))
+		.leftJoin(
+			itemRaw,
+			and(
+				eq(itemRaw.source, items.source),
+				eq(itemRaw.externalId, items.externalId),
+			),
+		)
+		.where(and(eq(items.id, id), notArchived))
 		.limit(1);
 	const row = rows[0];
 	if (!row) return null;
@@ -395,7 +438,7 @@ export interface PendingArticle {
 const pendingArticleSelect = {
 	id: items.id,
 	externalId: items.externalId,
-	rawJson: items.rawJson,
+	rawJson: itemRaw.payload,
 	url: items.url,
 	hydrateRequestedAt: items.hydrateRequestedAt,
 };
@@ -403,14 +446,14 @@ const pendingArticleSelect = {
 function pendingFromRow(
 	row: {
 		externalId: string;
-		rawJson: string;
+		rawJson: string | null;
 		url: string | null;
 		hydrateRequestedAt: Date | null;
 	},
 	forceRefetch = false,
 ): PendingArticle | null {
 	const refetch = forceRefetch || row.hydrateRequestedAt != null;
-	return pendingArticleFromRaw(row.externalId, row.rawJson, row.url, {
+	return pendingArticleFromRaw(row.externalId, row.rawJson ?? "", row.url, {
 		refetch,
 	});
 }
@@ -420,9 +463,17 @@ export async function getPendingArticles(limit = 40): Promise<PendingArticle[]> 
 	const refetchRows = await db
 		.select(pendingArticleSelect)
 		.from(items)
+		.leftJoin(
+			itemRaw,
+			and(
+				eq(itemRaw.source, items.source),
+				eq(itemRaw.externalId, items.externalId),
+			),
+		)
 		.where(
 			and(
-				listed,
+				// Hydration may include history articles. This is NOT the library list.
+				listedForKind("all"),
 				eq(items.contentType, "article"),
 				isNotNull(items.hydrateRequestedAt),
 			),
@@ -456,9 +507,16 @@ export async function getPendingArticles(limit = 40): Promise<PendingArticle[]> 
 	const rows = await db
 		.select(pendingArticleSelect)
 		.from(items)
+		.leftJoin(
+			itemRaw,
+			and(
+				eq(itemRaw.source, items.source),
+				eq(itemRaw.externalId, items.externalId),
+			),
+		)
 		.where(
 			and(
-				listed,
+				listedForKind("all"),
 				eq(items.contentType, "article"),
 				isNull(items.captureUnavailableAt),
 			),
@@ -487,19 +545,28 @@ export async function requestArticleRefetch(opts: {
 		const rows = await db
 			.select({
 				id: items.id,
-				rawJson: items.rawJson,
+				rawJson: itemRaw.payload,
 				contentType: items.contentType,
 			})
 			.from(items)
+			.leftJoin(
+				itemRaw,
+				and(
+					eq(itemRaw.source, items.source),
+					eq(itemRaw.externalId, items.externalId),
+				),
+			)
 			.where(
 				and(
-					listed,
+					listedForKind("all"),
 					eq(items.contentType, "article"),
 					inArray(items.id, itemIds),
 				),
 			);
 		const ids = rows
-			.filter((row) => isPendingArticleRaw(row.rawJson, row.contentType))
+			.filter((row) =>
+				isPendingArticleRaw(row.rawJson ?? "", row.contentType),
+			)
 			.map((row) => row.id);
 		if (ids.length === 0) return { queued: 0 };
 		await db
@@ -513,13 +580,22 @@ export async function requestArticleRefetch(opts: {
 		const rows = await db
 			.select({
 				id: items.id,
-				rawJson: items.rawJson,
+				rawJson: itemRaw.payload,
 				contentType: items.contentType,
 			})
 			.from(items)
-			.where(and(listed, eq(items.contentType, "article")));
+			.leftJoin(
+				itemRaw,
+				and(
+					eq(itemRaw.source, items.source),
+					eq(itemRaw.externalId, items.externalId),
+				),
+			)
+			.where(and(listedForKind("all"), eq(items.contentType, "article")));
 		const ids = rows
-			.filter((row) => isPendingArticleRaw(row.rawJson, row.contentType))
+			.filter((row) =>
+				isPendingArticleRaw(row.rawJson ?? "", row.contentType),
+			)
 			.map((row) => row.id);
 		if (ids.length === 0) return { queued: 0 };
 		const CHUNK = 400;
@@ -535,15 +611,22 @@ export async function requestArticleRefetch(opts: {
 	const rows = await db
 		.select({
 			id: items.id,
-			rawJson: items.rawJson,
+			rawJson: itemRaw.payload,
 			contentType: items.contentType,
 		})
 		.from(items)
-		.where(and(listed, eq(items.contentType, "article")));
+		.leftJoin(
+			itemRaw,
+			and(
+				eq(itemRaw.source, items.source),
+				eq(itemRaw.externalId, items.externalId),
+			),
+		)
+		.where(and(listedForKind("all"), eq(items.contentType, "article")));
 
 	const ids: string[] = [];
 	for (const row of rows) {
-		if (isPendingArticleRaw(row.rawJson, row.contentType)) ids.push(row.id);
+		if (isPendingArticleRaw(row.rawJson ?? "", row.contentType)) ids.push(row.id);
 	}
 	if (ids.length === 0) return { queued: 0 };
 	const CHUNK = 400;
@@ -563,10 +646,17 @@ export async function archiveItem(id: string): Promise<boolean> {
 			archivedAt: items.archivedAt,
 			source: items.source,
 			externalId: items.externalId,
-			rawJson: items.rawJson,
+			rawJson: itemRaw.payload,
 			contentType: items.contentType,
 		})
 		.from(items)
+		.leftJoin(
+			itemRaw,
+			and(
+				eq(itemRaw.source, items.source),
+				eq(itemRaw.externalId, items.externalId),
+			),
+		)
 		.where(eq(items.id, id))
 		.limit(1);
 	if (!row) return false;
@@ -576,7 +666,7 @@ export async function archiveItem(id: string): Promise<boolean> {
 	await recordSyncRevocation({
 		source: row.source,
 		externalId: row.externalId,
-		rawJson: row.rawJson,
+		rawJson: row.rawJson ?? "",
 		contentType: row.contentType,
 	});
 	return true;

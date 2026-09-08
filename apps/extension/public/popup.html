@@ -102,6 +102,14 @@
           <input type="checkbox" id="autoSync" checked />
           Auto-sync to server while capturing
         </label>
+        <label class="row" style="margin-bottom: 8px">
+          <input type="checkbox" id="captureLikes" />
+          Capture likes (off by default)
+        </label>
+        <label class="row" style="margin-bottom: 8px">
+          <input type="checkbox" id="captureHistory" />
+          Capture X history (off by default)
+        </label>
         <div class="row">
           <label><input type="radio" name="mode" value="api" checked /> Send to server</label>
           <label><input type="radio" name="mode" value="download" /> Download JSON</label>
@@ -129,7 +137,7 @@
       <button id="toggle" class="secondary">Toggle capture on this tab</button>
       <p id="status"></p>
       <p class="hint">
-        Capture starts on x.com bookmarks, likes, or history. New tweets sync to your server automatically.
+        Capture starts on bookmarks and with_replies. Enable likes or history above if needed.
       </p>
     </main>
     <script src="popup.js"></script>

@@ -1,9 +1,9 @@
-import { NextResponse } from 'next/server'
-import { getStats } from '@/lib/queries'
+import { NextResponse } from "next/server";
+import { getStats } from "@/lib/queries";
 
-export const runtime = 'nodejs'
-export const dynamic = 'force-dynamic'
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET(): Promise<NextResponse> {
-	return NextResponse.json(await getStats())
+	return NextResponse.json(await getStats());
 }

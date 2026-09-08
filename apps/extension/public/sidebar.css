@@ -58,7 +58,7 @@ html[style*="color-scheme: light"] .bp-sidebar-card__title {
 
 .bp-sidebar-card__metrics {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   margin: 0 0 12px;
   padding: 11px 0;
   border-top: 1px solid rgb(47, 51, 54);
@@ -233,4 +233,15 @@ html[style*="color-scheme: light"] .bp-sidebar-card__btn--secondary:hover {
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
   white-space: nowrap;
   transition: opacity 0.3s;
+}
+
+.bp-sidebar-card--floating {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483646;
+  width: min(320px, calc(100vw - 32px));
+  max-height: min(70vh, 480px);
+  overflow: auto;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55);
 }

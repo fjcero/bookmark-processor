@@ -1,5 +1,7 @@
 /** Heuristics for deciding when an incoming tweet JSON should replace a stub. */
 
+import { articleRawFrom, hasCompleteArticleRaw } from "./article.ts";
+
 function asRecord(value: unknown): Record<string, unknown> | null {
 	if (value && typeof value === "object" && !Array.isArray(value)) {
 		return value as Record<string, unknown>;
@@ -84,6 +86,10 @@ export function tweetPayloadScore(tweet: unknown): number {
 	if (hasNode(obj, "article")) score += 800;
 	if (hasNode(obj, "views")) score += 50;
 	if (hasNode(obj, "legacy", "entities", "urls")) score += 100;
+	// INVARIANT: `_articleRaw` is the expensive GraphQL body. It must outweigh
+	// quotes/media so a later history/like capture cannot look "richer".
+	if (articleRawFrom(obj) != null) score += 80_000;
+	if (hasCompleteArticleRaw(obj)) score += 40_000;
 	// Prefer fuller GraphQL blobs over hand-built stubs.
 	try {
 		score += Math.min(JSON.stringify(obj).length, 20000) / 20;
@@ -95,6 +101,10 @@ export function tweetPayloadScore(tweet: unknown): number {
 
 /** True when `incoming` should replace `existing` raw tweet JSON. */
 export function isRicherTweetPayload(incoming: unknown, existing: unknown): boolean {
+	// INVARIANT: never replace a row that has `_articleRaw` with one that doesn't.
+	if (articleRawFrom(existing) != null && articleRawFrom(incoming) == null) {
+		return false;
+	}
 	const next = tweetPayloadScore(incoming);
 	const prev = tweetPayloadScore(existing);
 	if (next <= prev) return false;

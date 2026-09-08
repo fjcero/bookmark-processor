@@ -1,4 +1,5 @@
-export type ItemKind = 'bookmark' | 'like' | 'history'
+/** bookmark | like | own — how the item entered your library */
+export type ItemKind = 'bookmark' | 'like' | 'own'
 export type ExportSource = ItemKind
 
 export const X_SOURCE = 'x'

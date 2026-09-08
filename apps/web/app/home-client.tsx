@@ -31,6 +31,7 @@ export interface StageCounts {
 
 export interface BucketStats {
 	total: number;
+	raw: StageCounts;
 	entities: StageCounts;
 	understanding: StageCounts;
 	categorized: StageCounts;
@@ -249,7 +250,9 @@ export default function HomeClient({
 	const [fetchedSelected, setFetchedSelected] = useState<ClientItem | null>(
 		null,
 	);
-	const [search, setSearch] = useState<ItemSearchState>({ q: "" });
+	const [search, setSearch] = useState<ItemSearchState>({
+		q: "",
+	});
 	const [resultTotal, setResultTotal] = useState<number | null>(null);
 	const [searching, setSearching] = useState(false);
 	const [syncStatus, setSyncStatus] = useState<SyncStatusResponse | null>(null);
@@ -805,16 +808,12 @@ export default function HomeClient({
 					/>
 				)}
 
-				<section className="mb-8 grid grid-cols-3 gap-3">
+				<section className="mb-8 grid grid-cols-2 gap-3 lg:grid-cols-4">
 					<ContentStat label="Posts" bucket={stats.posts} />
-					<ContentStat label="Articles" bucket={stats.articles} />
+					<ContentStat label="Articles" bucket={stats.articles} showRaw />
+					<TotalStat items={stats.items} archived={stats.archived} />
 					<Stat label="Authors" value={stats.users} />
 				</section>
-				{stats.archived > 0 ? (
-					<p className="-mt-5 mb-8 text-xs text-zinc-500">
-						{stats.archived} archived
-					</p>
-				) : null}
 
 				{onQueuePage ? (
 					<>
@@ -883,7 +882,9 @@ export default function HomeClient({
 								}`}
 							>
 								<div className="mb-3 flex items-start justify-between gap-2">
-									<Author item={item} />
+									<div className="min-w-0">
+										<Author item={item} />
+									</div>
 									<TypeBadges item={item} />
 								</div>
 								<div className="flex-1">
@@ -893,8 +894,11 @@ export default function HomeClient({
 									<EmbeddedTweetList embeds={item.embeds ?? []} compact className="mt-3" />
 								)}
 								<ItemMedia urls={item.mediaUrls} className="mt-3" compact />
-								<div className="mt-3 flex flex-wrap gap-1">
-									<CategoryBadges item={item} />
+								<div className="mt-3 flex items-end justify-between gap-2">
+									<div className="flex min-w-0 flex-1 flex-wrap gap-1">
+										<CategoryBadges item={item} />
+									</div>
+									<ItemDate item={item} sort={sort} />
 								</div>
 							</article>
 						))}
@@ -905,6 +909,7 @@ export default function HomeClient({
 							<thead className="bg-zinc-900/80 font-mono text-[11px] tracking-wide text-zinc-500 uppercase">
 								<tr>
 									<th className="px-4 py-3 font-medium">Author</th>
+									<th className="px-4 py-3 font-medium">Date</th>
 									<th className="px-4 py-3 font-medium">Type</th>
 									<th className="px-4 py-3 font-medium">Text</th>
 									<th className="px-4 py-3 font-medium">Categories</th>
@@ -924,6 +929,9 @@ export default function HomeClient({
 									>
 										<td className="px-4 py-3 whitespace-nowrap">
 											<Author item={item} />
+										</td>
+										<td className="px-4 py-3 whitespace-nowrap">
+											<ItemDate item={item} sort={sort} />
 										</td>
 										<td className="px-4 py-3">
 											<TypeBadges item={item} />
@@ -987,6 +995,42 @@ export default function HomeClient({
 				/>
 			)}
 		</div>
+	);
+}
+
+function itemDisplayDate(
+	item: ClientItem,
+	sort: ItemSort,
+): { iso: string; text: string } {
+	const iso =
+		sort === "published"
+			? item.publishedAt ?? item.importedAt
+			: item.importedAt;
+	return {
+		iso,
+		text: new Date(iso).toLocaleDateString(undefined, {
+			dateStyle: "medium",
+		}),
+	};
+}
+
+function ItemDate({
+	item,
+	sort,
+	className = "",
+}: {
+	item: ClientItem;
+	sort: ItemSort;
+	className?: string;
+}) {
+	const { iso, text } = itemDisplayDate(item, sort);
+	return (
+		<time
+			dateTime={iso}
+			className={`shrink-0 font-mono text-[11px] text-zinc-500 ${className}`}
+		>
+			{text}
+		</time>
 	);
 }
 
@@ -1554,9 +1598,11 @@ function ItemMedia({
 function ContentStat({
 	label,
 	bucket,
+	showRaw = false,
 }: {
 	label: string;
 	bucket: BucketStats;
+	showRaw?: boolean;
 }) {
 	return (
 		<div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3">
@@ -1565,6 +1611,11 @@ function ContentStat({
 			</div>
 			<div className="mt-1 text-xl font-medium">{bucket.total}</div>
 			<div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 font-mono text-xs text-zinc-500">
+				{showRaw && (
+					<span title="Captured GraphQL / article body. Never drop this.">
+						R {bucket.raw.done}/{bucket.total}
+					</span>
+				)}
 				<span>
 					E {bucket.entities.done}/{bucket.total}
 				</span>
@@ -1575,6 +1626,28 @@ function ContentStat({
 					C {bucket.categorized.done}/{bucket.total}
 				</span>
 			</div>
+		</div>
+	);
+}
+
+function TotalStat({
+	items,
+	archived,
+}: {
+	items: number;
+	archived: number;
+}) {
+	return (
+		<div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3">
+			<div className="font-mono text-[11px] tracking-wide text-zinc-500 uppercase">
+				Items
+			</div>
+			<div className="mt-1 text-xl font-medium">{items}</div>
+			{archived > 0 && (
+				<div className="mt-2 font-mono text-xs text-zinc-500">
+					{archived} archived
+				</div>
+			)}
 		</div>
 	);
 }

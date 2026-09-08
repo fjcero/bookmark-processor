@@ -1,5 +1,5 @@
 import { and, eq, like, or, sql, type SQL } from "drizzle-orm";
-import { items, users } from "@repo/db";
+import { items, itemRaw, users } from "@repo/db";
 import type { ContentType, PostFormat } from "@repo/import";
 
 export interface ItemSearchFilters {
@@ -26,40 +26,38 @@ const TYPE_KEYWORDS: Record<
 	retweets: { postFormat: "repost" },
 	thread: { postFormat: "thread" },
 	threads: { postFormat: "thread" },
-	bookmark: { contentType: "post" },
-	like: { contentType: "post" },
 };
 
 function replyCondition(): SQL {
 	return sql`(
-		json_extract(${items.rawJson}, '$.legacy.in_reply_to_status_id_str') IS NOT NULL
-		OR json_extract(${items.rawJson}, '$.in_reply_to_tweet_id') IS NOT NULL
-		OR json_extract(${items.rawJson}, '$.in_reply_to_status_id_str') IS NOT NULL
+		json_extract(${itemRaw.payload}, '$.legacy.in_reply_to_status_id_str') IS NOT NULL
+		OR json_extract(${itemRaw.payload}, '$.in_reply_to_tweet_id') IS NOT NULL
+		OR json_extract(${itemRaw.payload}, '$.in_reply_to_status_id_str') IS NOT NULL
 	)`;
 }
 
 function repostCondition(): SQL {
 	return sql`(
-		json_extract(${items.rawJson}, '$.legacy.retweeted_status_id_str') IS NOT NULL
-		OR json_extract(${items.rawJson}, '$.retweeted_status_result') IS NOT NULL
-		OR json_extract(${items.rawJson}, '$.legacy.retweeted_status_result') IS NOT NULL
+		json_extract(${itemRaw.payload}, '$.legacy.retweeted_status_id_str') IS NOT NULL
+		OR json_extract(${itemRaw.payload}, '$.retweeted_status_result') IS NOT NULL
+		OR json_extract(${itemRaw.payload}, '$.legacy.retweeted_status_result') IS NOT NULL
 	)`;
 }
 
 function quoteCondition(): SQL {
 	return sql`(
-		json_extract(${items.rawJson}, '$.legacy.quoted_status_id_str') IS NOT NULL
-		OR json_extract(${items.rawJson}, '$.quoted_status_id_str') IS NOT NULL
-		OR json_extract(${items.rawJson}, '$.quoted_tweet_id_str') IS NOT NULL
-		OR json_extract(${items.rawJson}, '$.quoted_status_result') IS NOT NULL
-		OR json_extract(${items.rawJson}, '$.quoted_ref_result') IS NOT NULL
+		json_extract(${itemRaw.payload}, '$.legacy.quoted_status_id_str') IS NOT NULL
+		OR json_extract(${itemRaw.payload}, '$.quoted_status_id_str') IS NOT NULL
+		OR json_extract(${itemRaw.payload}, '$.quoted_tweet_id_str') IS NOT NULL
+		OR json_extract(${itemRaw.payload}, '$.quoted_status_result') IS NOT NULL
+		OR json_extract(${itemRaw.payload}, '$.quoted_ref_result') IS NOT NULL
 	)`;
 }
 
 function threadCondition(): SQL {
 	return sql`(
-		json_extract(${items.rawJson}, '$.legacy.self_thread') IS NOT NULL
-		OR json_extract(${items.rawJson}, '$.self_thread') IS NOT NULL
+		json_extract(${itemRaw.payload}, '$.legacy.self_thread') IS NOT NULL
+		OR json_extract(${itemRaw.payload}, '$.self_thread') IS NOT NULL
 	)`;
 }
 
@@ -93,9 +91,9 @@ function termMatches(term: string): SQL {
 			like(items.entities, pattern),
 			like(items.understanding, pattern),
 			like(items.kind, pattern),
-			sql`json_extract(${items.rawJson}, '$.article.article_results.result.title') LIKE ${pattern}`,
-			sql`json_extract(${items.rawJson}, '$.article.article_results.result.preview_text') LIKE ${pattern}`,
-			sql`json_extract(${items.rawJson}, '$.article.article_results.result.summary_text') LIKE ${pattern}`,
+			sql`json_extract(${itemRaw.payload}, '$.article.article_results.result.title') LIKE ${pattern}`,
+			sql`json_extract(${itemRaw.payload}, '$.article.article_results.result.preview_text') LIKE ${pattern}`,
+			sql`json_extract(${itemRaw.payload}, '$.article.article_results.result.summary_text') LIKE ${pattern}`,
 		) ?? sql`0`;
 
 	if (!keyword) return textMatch;

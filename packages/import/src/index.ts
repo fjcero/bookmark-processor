@@ -14,6 +14,12 @@ export type {
 export { X_SOURCE } from './types'
 export { parseExportV2, isImportableTweet } from './parse'
 export {
+  captureLabel,
+  captureSourceFromPath,
+  resolveItemKind,
+  shouldPromoteKind,
+} from './capture-source'
+export {
   SORT_INDEX_KEY,
   applySortIndexes,
   collectSortIndexes,
@@ -54,12 +60,14 @@ export {
   mergeArticleResults,
   pendingArticleFromRaw,
   stampArticleRaw,
+  keepArticleRaw,
   type PendingArticleRef,
 } from './article'
 export {
   isRicherTweetPayload,
   tweetPayloadScore,
 } from './tweet-richness'
+export { chooseBetterRaw, chooseBetterRawJson } from './raw-upgrade'
 export {
   enableArticleBodyFieldToggles,
   graphqlOperationName,

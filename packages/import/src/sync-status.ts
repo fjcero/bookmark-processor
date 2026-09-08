@@ -33,6 +33,8 @@ export interface ImportWorkerProgress {
 	importedDelta?: number;
 	skippedDelta?: number;
 	libraryTotal?: number | null;
+	libraryPosts?: number | null;
+	libraryArticles?: number | null;
 	lastError?: string;
 }
 

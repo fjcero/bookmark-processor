@@ -23,7 +23,11 @@ export async function OPTIONS(request: NextRequest): Promise<NextResponse> {
 export async function GET(request: NextRequest): Promise<NextResponse> {
 	const stats = await getStats();
 	return NextResponse.json(
-		{ total: stats.items },
+		{
+			total: stats.items,
+			posts: stats.posts.total,
+			articles: stats.articles.total,
+		},
 		{ headers: captureCorsHeaders(request) },
 	);
 }
@@ -40,7 +44,7 @@ interface CaptureBody {
 
 function filenameFromSource(source: string | undefined): string {
 	if (source === "like") return "likes.json";
-	if (source === "history") return "history.json";
+	if (source === "own") return "own.json";
 	return "bookmarks.json";
 }
 
@@ -102,6 +106,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 		);
 	}
 
+	// Tweet shells in the payload (no author / article) must still count as handled
+	// so the extension worker can dequeue the full batch.
+	const unparseable = tweetCount - result.parsed.items;
+	if (unparseable > 0) {
+		result.items.skipped += unparseable;
+	}
+
 	const stages = selectedStages(prefs);
 	let processing = false;
 	if (stages.length > 0 && result.affectedItemIds.length > 0) {
@@ -116,6 +127,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 		{
 			...result,
 			total: stats.items,
+			posts: stats.posts.total,
+			articles: stats.articles.total,
 			prefs,
 			processing,
 		},

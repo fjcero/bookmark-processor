@@ -157,7 +157,7 @@ export function parseArticleContentFromRaw(
   try {
     const parsed = JSON.parse(rawJson) as unknown
     const article =
-      articleResultFromTweet(parsed) ?? findHydratedArticleResult(parsed)
+      findHydratedArticleResult(parsed) ?? articleResultFromTweet(parsed)
     return parseArticleContent(article)
   } catch {
     return null

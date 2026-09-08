@@ -10,6 +10,10 @@ export interface ExtensionSettings {
 	serverUrl: string;
 	mode: "api" | "download";
 	autoSync: boolean;
+	/** Opt-in capture on x.com/i/history. Default off. */
+	captureHistory: boolean;
+	/** Opt-in capture/sync on likes pages. Default off. */
+	captureLikes: boolean;
 	scrollDelayMs: number;
 	/** Direct GraphQL article hydrations per service-worker alarm wake. */
 	articleDirectBatch: number;
@@ -21,6 +25,8 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
 	serverUrl: "http://localhost:3000",
 	mode: "api",
 	autoSync: true,
+	captureHistory: false,
+	captureLikes: false,
 	scrollDelayMs: 300,
 	articleDirectBatch: 5,
 };
@@ -45,6 +51,8 @@ export async function loadSettings(): Promise<ExtensionSettings> {
 		return {
 			...DEFAULT_SETTINGS,
 			...saved,
+			captureHistory: Boolean(saved?.captureHistory),
+			captureLikes: Boolean(saved?.captureLikes),
 			scrollDelayMs: clampScrollDelayMs(
 				saved?.scrollDelayMs ?? DEFAULT_SETTINGS.scrollDelayMs,
 			),
@@ -63,6 +71,8 @@ export async function saveSettings(settings: ExtensionSettings): Promise<void> {
 		await chrome.storage.sync.set({
 			[SETTINGS_KEY]: {
 				...settings,
+				captureHistory: Boolean(settings.captureHistory),
+				captureLikes: Boolean(settings.captureLikes),
 				scrollDelayMs: clampScrollDelayMs(settings.scrollDelayMs),
 				articleDirectBatch: clampArticleDirectBatch(
 					settings.articleDirectBatch,

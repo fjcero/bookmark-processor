@@ -1,6 +1,6 @@
 import { and, count, eq, gt, inArray, isNull } from "drizzle-orm";
 import { isPendingArticleRaw } from "@repo/import";
-import { db, itemCategories, items } from "@repo/db";
+import { db, itemCategories, itemRaw, items } from "@repo/db";
 import { extractEntities, type ExtractedEntities } from "./entities";
 import {
 	categorizeBatch,
@@ -109,8 +109,18 @@ async function runEntities(
 	while (true) {
 		if (shouldAbort()) break;
 		const rows = await db
-			.select({ id: items.id, rawJson: items.rawJson })
+			.select({
+				id: items.id,
+				rawJson: itemRaw.payload,
+			})
 			.from(items)
+			.leftJoin(
+				itemRaw,
+				and(
+					eq(itemRaw.source, items.source),
+					eq(itemRaw.externalId, items.externalId),
+				),
+			)
 			.where(pendingWhere(items.entities, cursor))
 			.orderBy(items.id)
 			.limit(CHUNK);
@@ -119,7 +129,7 @@ async function runEntities(
 		cursor = rows[rows.length - 1].id;
 
 		for (const row of rows) {
-			const entities = extractEntities(row.rawJson);
+			const entities = extractEntities(row.rawJson ?? "");
 			await db
 				.update(items)
 				.set({ entities: JSON.stringify(entities) })
@@ -149,9 +159,16 @@ async function runUnderstanding(
 				text: items.text,
 				contentType: items.contentType,
 				entities: items.entities,
-				rawJson: items.rawJson,
+				rawJson: itemRaw.payload,
 			})
 			.from(items)
+			.leftJoin(
+				itemRaw,
+				and(
+					eq(itemRaw.source, items.source),
+					eq(itemRaw.externalId, items.externalId),
+				),
+			)
 			.where(pendingWhere(items.understanding, cursor))
 			.orderBy(items.id)
 			.limit(UNDERSTANDING_BATCH_SIZE);
@@ -160,7 +177,7 @@ async function runUnderstanding(
 		cursor = rows[rows.length - 1].id;
 
 		const ready = rows.filter(
-			(r) => !isUnhydratedArticle(r.contentType, r.rawJson),
+			(r) => !isUnhydratedArticle(r.contentType, r.rawJson ?? ""),
 		);
 		const trivial = ready.filter(
 			(r) => r.contentType !== "article" && r.text.trim().length < 20,
@@ -240,9 +257,16 @@ async function runCategorize(
 				entities: items.entities,
 				understanding: items.understanding,
 				contentType: items.contentType,
-				rawJson: items.rawJson,
+				rawJson: itemRaw.payload,
 			})
 			.from(items)
+			.leftJoin(
+				itemRaw,
+				and(
+					eq(itemRaw.source, items.source),
+					eq(itemRaw.externalId, items.externalId),
+				),
+			)
 			.where(pendingWhere(items.categorizedAt, cursor))
 			.orderBy(items.id)
 			.limit(CATEGORIZE_BATCH_SIZE);
@@ -251,7 +275,7 @@ async function runCategorize(
 		cursor = rows[rows.length - 1].id;
 
 		const ready = rows.filter(
-			(r) => !isUnhydratedArticle(r.contentType, r.rawJson),
+			(r) => !isUnhydratedArticle(r.contentType, r.rawJson ?? ""),
 		);
 		if (ready.length === 0) {
 			if (rows.length < CATEGORIZE_BATCH_SIZE) break;

@@ -2,7 +2,8 @@ export const ROOT_ID = "bp-capture-root";
 
 export interface SidebarUiRefs {
 	root: HTMLElement;
-	statEl: HTMLElement;
+	postsEl: HTMLElement;
+	articlesEl: HTMLElement;
 	totalEl: HTMLElement;
 	syncEl: HTMLElement;
 	articleEl: HTMLElement;
@@ -97,22 +98,29 @@ function insertIntoSidebar(root: HTMLElement): boolean {
 	const sidebar = getVisibleSidebar();
 	if (!sidebar) return false;
 
-	const stack = findWidgetStack(sidebar);
-	if (!stack) return false;
-
 	sidebar.querySelector(`#${ROOT_ID}`)?.remove();
 
-	// Escape sticky/overflow-hidden wrappers — insert after the clipping box, not inside it.
-	const clipper = findClippingAncestor(stack, sidebar);
-	const anchor = clipper ?? stack;
-	anchor.insertAdjacentElement("afterend", root);
+	const stack = findWidgetStack(sidebar);
+	if (stack) {
+		const clipper = findClippingAncestor(stack, sidebar);
+		const anchor = clipper ?? stack;
+		anchor.insertAdjacentElement("afterend", root);
+		if (root.isConnected && sidebar.contains(root)) return true;
+	}
 
+	root.classList.remove("bp-sidebar-card--floating");
+	sidebar.prepend(root);
 	return root.isConnected && sidebar.contains(root);
+}
+
+function mountFloating(root: HTMLElement): void {
+	document.getElementById(ROOT_ID)?.remove();
+	root.classList.add("bp-sidebar-card--floating");
+	document.body.appendChild(root);
 }
 
 export function buildSidebarPanel(opts: {
 	label: string;
-	count: number;
 	onSyncRetry: () => void;
 	onAutoScroll: () => void;
 }): SidebarUiRefs {
@@ -135,19 +143,27 @@ export function buildSidebarPanel(opts: {
 	const body = document.createElement("div");
 	body.className = "bp-sidebar-card__body";
 
-	const statEl = document.createElement("strong");
-	statEl.className = "bp-sidebar-card__stat";
-	statEl.textContent = String(opts.count);
+	const postsEl = document.createElement("strong");
+	postsEl.textContent = "—";
 
-	const pendingLabel = document.createElement("span");
-	pendingLabel.textContent = "Pending sync";
+	const postsLabel = document.createElement("span");
+	postsLabel.textContent = "Posts";
 
-	const pendingMetric = document.createElement("div");
-	pendingMetric.className = "bp-sidebar-card__metric";
-	pendingMetric.append(statEl, pendingLabel);
+	const postsMetric = document.createElement("div");
+	postsMetric.className = "bp-sidebar-card__metric";
+	postsMetric.append(postsEl, postsLabel);
+
+	const articlesEl = document.createElement("strong");
+	articlesEl.textContent = "—";
+
+	const articlesLabel = document.createElement("span");
+	articlesLabel.textContent = "Articles";
+
+	const articlesMetric = document.createElement("div");
+	articlesMetric.className = "bp-sidebar-card__metric";
+	articlesMetric.append(articlesEl, articlesLabel);
 
 	const totalEl = document.createElement("strong");
-	totalEl.className = "bp-sidebar-card__total";
 	totalEl.textContent = "—";
 
 	const totalLabel = document.createElement("span");
@@ -159,7 +175,7 @@ export function buildSidebarPanel(opts: {
 
 	const metrics = document.createElement("div");
 	metrics.className = "bp-sidebar-card__metrics";
-	metrics.append(pendingMetric, totalMetric);
+	metrics.append(postsMetric, articlesMetric, totalMetric);
 
 	const actions = document.createElement("div");
 	actions.className = "bp-sidebar-card__actions";
@@ -193,7 +209,8 @@ export function buildSidebarPanel(opts: {
 
 	return {
 		root,
-		statEl,
+		postsEl,
+		articlesEl,
 		totalEl,
 		syncEl,
 		articleEl,
@@ -202,21 +219,44 @@ export function buildSidebarPanel(opts: {
 	};
 }
 
-export function updateSidebarCount(
-	refs: SidebarUiRefs,
-	count: number | string,
-	label = "Pending sync",
-): void {
-	refs.statEl.textContent = String(count);
-	const labelEl = refs.statEl.nextElementSibling;
-	if (labelEl instanceof HTMLElement) labelEl.textContent = label;
+export interface LibraryStatsView {
+	posts: number | null;
+	articles: number | null;
+	total: number | null;
 }
 
-export function updateServerTotal(
+function formatCount(value: number | null): string {
+	return value == null ? "—" : value.toLocaleString();
+}
+
+export function updateLibraryStats(
 	refs: SidebarUiRefs,
-	total: number | null,
+	stats: LibraryStatsView | null,
 ): void {
-	refs.totalEl.textContent = total == null ? "—" : total.toLocaleString();
+	if (!stats) {
+		refs.postsEl.textContent = "—";
+		refs.articlesEl.textContent = "—";
+		refs.totalEl.textContent = "—";
+		return;
+	}
+	refs.postsEl.textContent = formatCount(stats.posts);
+	refs.articlesEl.textContent = formatCount(stats.articles);
+	refs.totalEl.textContent = formatCount(stats.total);
+}
+
+export function updateSessionStats(
+	refs: SidebarUiRefs,
+	stats: { new: number; skipped: number; pending: number },
+): void {
+	const parts = [
+		`${stats.new} new`,
+		`${stats.skipped} skipped`,
+	];
+	if (stats.pending > 0) {
+		parts.push(`${stats.pending} pending`);
+	}
+	refs.syncEl.textContent = parts.join(" · ");
+	refs.syncEl.classList.remove("bp-sidebar-card__sync--err");
 }
 
 export function setSyncStatus(refs: SidebarUiRefs, message: string): void {
@@ -267,19 +307,18 @@ export function setAutoScrollUi(
 
 export function mountSidebarUi(opts: {
 	label: string;
-	count: number;
 	onSyncRetry: () => void;
 	onAutoScroll: () => void;
 }): SidebarUiRefs | null {
 	const panel = buildSidebarPanel(opts);
-	if (!insertIntoSidebar(panel.root)) return null;
+	if (insertIntoSidebar(panel.root)) return panel;
+	mountFloating(panel.root);
 	return panel;
 }
 
 export function mountSidebarUiWithRetry(
 	opts: {
 		label: string;
-		count: number;
 		onSyncRetry: () => void;
 		onAutoScroll: () => void;
 	},
@@ -298,7 +337,7 @@ export function mountSidebarUiWithRetry(
 		if (tryMount()) observer.disconnect();
 	});
 	observer.observe(document.body, { childList: true, subtree: true });
-	const timeout = setTimeout(() => observer.disconnect(), 15000);
+	const timeout = setTimeout(() => observer.disconnect(), 60_000);
 
 	return () => {
 		observer.disconnect();
@@ -307,5 +346,6 @@ export function mountSidebarUiWithRetry(
 }
 
 export function unmountSidebarUi(): void {
-	document.getElementById(ROOT_ID)?.remove();
+	const el = document.getElementById(ROOT_ID);
+	el?.remove();
 }

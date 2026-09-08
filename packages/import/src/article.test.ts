@@ -20,6 +20,7 @@ import {
   pendingArticleFromRaw,
   hasCompleteArticleRaw,
   hasFullArticleBody,
+  keepArticleRaw,
 } from "./article.ts";
 
 const fixtureDir = join(dirname(fileURLToPath(import.meta.url)), "../fixtures");
@@ -368,5 +369,16 @@ test("detects unavailable article pages and payloads", () => {
       },
     }),
     true,
+  );
+});
+
+test("keepArticleRaw stamps existing _articleRaw onto an incoming tweet that lacks it", () => {
+  const existing = { rest_id: "1", _articleRaw: { data: { ok: true } } };
+  const incoming = { rest_id: "1", legacy: { full_text: "newer envelope" } };
+  const merged = keepArticleRaw(incoming, existing) as Record<string, unknown>;
+  assert.deepEqual(merged._articleRaw, { data: { ok: true } });
+  assert.equal(
+    (merged.legacy as { full_text?: string }).full_text,
+    "newer envelope",
   );
 });

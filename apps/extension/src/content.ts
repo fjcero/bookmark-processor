@@ -11,12 +11,13 @@ import {
 	pendingArticleFromRaw,
 	type GraphQLArticleResult,
 	type ImportWorkerProgress,
+	isImportableTweet,
 } from "@repo/import";
 import { clearCaptureQueue } from "@repo/import/capture/hooks-events";
 import {
 	createBackgroundStorageAdapter,
 	enqueueImportsInBackground,
-	fetchTotalInBackground,
+	fetchLibraryStatsInBackground,
 } from "./core/background-client";
 import { loadSettings } from "./core/storage";
 import {
@@ -28,8 +29,8 @@ import {
 	showToast,
 	type SidebarUiRefs,
 	unmountSidebarUi,
-	updateSidebarCount,
-	updateServerTotal,
+	updateLibraryStats,
+	updateSessionStats,
 } from "./sidebar-ui";
 import { clickTimelineRetry } from "./timeline-recovery";
 
@@ -45,7 +46,15 @@ function isArticlePage(): boolean {
 	return /\/i\/article\/\d+/.test(location.pathname);
 }
 
-function isCapturePage(): boolean {
+function isHistoryPage(): boolean {
+	return location.pathname.includes("/history");
+}
+
+function isLikesPage(): boolean {
+	return location.pathname.includes("/likes");
+}
+
+function isLikelyCapturePath(): boolean {
 	if (
 		!location.hostname.includes("twitter.com") &&
 		!location.hostname.includes("x.com")
@@ -55,8 +64,17 @@ function isCapturePage(): boolean {
 	return (
 		location.pathname.includes("/bookmarks") ||
 		location.pathname.includes("/likes") ||
+		location.pathname.includes("/with_replies") ||
 		location.pathname.includes("/history")
 	);
+}
+
+async function isCapturePage(): Promise<boolean> {
+	if (!isLikelyCapturePath()) return false;
+	const settings = await loadSettings();
+	if (isHistoryPage()) return settings.captureHistory;
+	if (isLikesPage()) return settings.captureLikes;
+	return true;
 }
 
 let engine: CaptureEngine | null = null;
@@ -71,6 +89,11 @@ let retryObserver: MutationObserver | null = null;
 let sessionImported = 0;
 let sessionSkipped = 0;
 let libraryArticlesMissing: number | null = null;
+let libraryStats: {
+	posts: number | null;
+	articles: number | null;
+	total: number | null;
+} = { posts: null, articles: null, total: null };
 
 function reportCaptureScroll(active: boolean): void {
 	try {
@@ -94,13 +117,22 @@ function applyArticleStats(stats: {
 function renderSessionProgress(): void {
 	if (!sidebar) return;
 	const pending = engine?.tweetCount() ?? 0;
-	const captured = engine?.observedCount() ?? 0;
-	const synced = sessionImported + sessionSkipped;
-	updateSidebarCount(sidebar, `${captured} / ${synced}`, "Captured / synced");
-	setSyncStatus(
-		sidebar,
-		`${sessionImported} new · ${sessionSkipped} skipped · ${pending} pending`,
-	);
+	updateSessionStats(sidebar, {
+		new: sessionImported,
+		skipped: sessionSkipped,
+		pending,
+	});
+}
+
+function applyLibraryStats(partial: {
+	posts?: number | null;
+	articles?: number | null;
+	total?: number | null;
+}): void {
+	if (partial.posts != null) libraryStats.posts = partial.posts;
+	if (partial.articles != null) libraryStats.articles = partial.articles;
+	if (partial.total != null) libraryStats.total = partial.total;
+	if (sidebar) updateLibraryStats(sidebar, libraryStats);
 }
 
 function trackPendingCount(count: number): void {
@@ -114,9 +146,11 @@ function applyImportProgress(progress: ImportWorkerProgress): void {
 	}
 	sessionImported += progress.importedDelta ?? 0;
 	sessionSkipped += progress.skippedDelta ?? 0;
-	if (sidebar && progress.libraryTotal != null) {
-		updateServerTotal(sidebar, progress.libraryTotal);
-	}
+	applyLibraryStats({
+		total: progress.libraryTotal,
+		posts: progress.libraryPosts,
+		articles: progress.libraryArticles,
+	});
 	renderSessionProgress();
 	if (!sidebar) return;
 
@@ -291,18 +325,24 @@ function watchArticleHtml(
 	}, 40_000);
 }
 
-async function refreshServerTotal(): Promise<void> {
+async function refreshLibraryStats(): Promise<void> {
 	if (!sidebar) return;
 	const settings = await loadSettings();
 	if (settings.mode !== "api" || !settings.serverUrl) {
-		updateServerTotal(sidebar, null);
+		libraryStats = { posts: null, articles: null, total: null };
+		updateLibraryStats(sidebar, null);
 		return;
 	}
 	try {
-		const total = await fetchTotalInBackground(settings.serverUrl);
-		if (sidebar) updateServerTotal(sidebar, total);
+		const stats = await fetchLibraryStatsInBackground(settings.serverUrl);
+		if (!sidebar) return;
+		if (!stats) {
+			updateLibraryStats(sidebar, null);
+			return;
+		}
+		applyLibraryStats(stats);
 	} catch {
-		if (sidebar) updateServerTotal(sidebar, null);
+		if (sidebar) updateLibraryStats(sidebar, null);
 	}
 }
 
@@ -369,7 +409,17 @@ async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
 	}
 
 	const pendingPayload = engine.buildPayload();
-	const pendingCount = Object.keys(pendingPayload.tweets).length;
+	const tweetEntries = Object.entries(pendingPayload.tweets);
+	const shellIds = tweetEntries
+		.filter(([, tweet]) => !isImportableTweet(tweet))
+		.map(([id]) => id);
+	if (shellIds.length > 0) {
+		engine.removeSynced(shellIds);
+	}
+	const importableTweets = Object.fromEntries(
+		tweetEntries.filter(([, tweet]) => isImportableTweet(tweet)),
+	);
+	const pendingCount = Object.keys(importableTweets).length;
 	if (pendingCount === 0) {
 		if (opts.manual) showToast("Nothing to sync yet — scroll first");
 		return;
@@ -378,7 +428,7 @@ async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
 	const settings = await loadSettings();
 
 	if (settings.mode === "download") {
-		downloadPayload(pendingPayload);
+		downloadPayload({ ...pendingPayload, tweets: importableTweets });
 		showToast(`Downloaded ${pendingCount} ${engine.label}`);
 		clearCaptureQueue();
 		await engine.reset();
@@ -399,7 +449,7 @@ async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
 
 	try {
 		const progress = await enqueueImportsInBackground(
-			pendingPayload,
+			{ ...pendingPayload, tweets: importableTweets },
 			settings.serverUrl,
 		);
 		applyImportProgress(progress);
@@ -483,12 +533,10 @@ function mountUi(): void {
 	if (uiMounted || !engine) return;
 
 	const label = engine.label;
-	const count = engine.tweetCount();
 
 	stopSidebarRetry = mountSidebarUiWithRetry(
 		{
 			label,
-			count,
 			onSyncRetry: () => void performSync({ manual: true }),
 			onAutoScroll: handleAutoScroll,
 		},
@@ -496,14 +544,14 @@ function mountUi(): void {
 			sidebar = refs;
 			uiMounted = true;
 			renderSessionProgress();
-			void refreshServerTotal();
+			void refreshLibraryStats();
 			void refreshArticleStats();
 		},
 	);
 }
 
 async function startCapture(): Promise<void> {
-	if (!isCapturePage()) return;
+	if (!(await isCapturePage())) return;
 	if (engine) {
 		showToast("Capture already active");
 		return;
@@ -560,7 +608,43 @@ async function stopCapture(): Promise<void> {
 	showToast("Capture stopped");
 }
 
+let messageListenerRegistered = false;
+let routeWatcherStarted = false;
+let lastHref = location.href;
+
+async function handleRouteChange(): Promise<void> {
+	if (location.href === lastHref) return;
+	lastHref = location.href;
+
+	if (isArticlePage()) {
+		if (engine) await stopCapture();
+		startArticlePageCapture();
+		return;
+	}
+
+	if (await isCapturePage()) {
+		if (!messageListenerRegistered) {
+			registerMessageListener();
+			messageListenerRegistered = true;
+		}
+		if (!engine) await startCapture();
+		return;
+	}
+
+	if (engine) await stopCapture();
+}
+
+function startRouteWatcher(): void {
+	if (routeWatcherStarted) return;
+	routeWatcherStarted = true;
+	window.setInterval(() => {
+		void handleRouteChange();
+	}, 800);
+}
+
 function registerMessageListener(): void {
+	if (messageListenerRegistered) return;
+	messageListenerRegistered = true;
 	try {
 		chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 			if (message?.type === "bp-toggle-capture") {
@@ -618,7 +702,7 @@ function hasExtensionContext(): boolean {
 	}
 }
 
-function boot(): void {
+async function boot(): Promise<void> {
 	try {
 		if (!hasExtensionContext()) {
 			console.warn(
@@ -626,11 +710,13 @@ function boot(): void {
 			);
 			return;
 		}
+		startRouteWatcher();
+		lastHref = location.href;
 		if (isArticlePage()) {
 			startArticlePageCapture();
 			return;
 		}
-		if (!isCapturePage()) return;
+		if (!(await isCapturePage())) return;
 		registerMessageListener();
 		void startCapture();
 	} catch (err) {
@@ -639,4 +725,4 @@ function boot(): void {
 	}
 }
 
-boot();
+void boot();

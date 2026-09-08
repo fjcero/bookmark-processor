@@ -54,10 +54,12 @@ export default function ItemSearchBar({
 	loading?: boolean;
 }) {
 	const active =
-		value.q.trim().length > 0 || value.contentType || value.postFormat;
+		value.q.trim().length > 0 ||
+		value.contentType ||
+		value.postFormat;
 
 	return (
-		<section className="mb-6 space-y-3">
+		<section className="sticky top-0 z-20 -mx-6 mb-6 space-y-3 border-b border-zinc-800/80 bg-[var(--background)]/95 px-6 py-3 backdrop-blur-sm">
 			<div className="relative">
 				<span
 					className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-zinc-500"
@@ -71,7 +73,7 @@ export default function ItemSearchBar({
 					onChange={(e) => onChange({ ...value, q: e.target.value })}
 					placeholder="Search title, author, content, type…"
 					className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 py-2.5 pr-10 pl-9 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-violet-500/60 focus:outline-none focus:ring-1 focus:ring-violet-500/30"
-					aria-label="Search bookmarks"
+					aria-label="Search items"
 				/>
 				{active && (
 					<button

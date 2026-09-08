@@ -7,6 +7,12 @@ import {
 
 const serverUrlInput = document.getElementById("serverUrl") as HTMLInputElement;
 const autoSyncInput = document.getElementById("autoSync") as HTMLInputElement;
+const captureHistoryInput = document.getElementById(
+	"captureHistory",
+) as HTMLInputElement;
+const captureLikesInput = document.getElementById(
+	"captureLikes",
+) as HTMLInputElement;
 const scrollDelayInput = document.getElementById(
 	"scrollDelayMs",
 ) as HTMLInputElement;
@@ -41,7 +47,7 @@ async function refreshStatus() {
 		}
 	} catch {
 		statusEl.textContent =
-			"Open x.com bookmarks, likes, or history, then try again";
+			"Open x.com bookmarks, likes, or your with_replies tab, then try again";
 	}
 }
 
@@ -49,6 +55,8 @@ async function init() {
 	const settings = await loadSettings();
 	serverUrlInput.value = settings.serverUrl;
 	autoSyncInput.checked = settings.autoSync;
+	captureHistoryInput.checked = settings.captureHistory;
+	captureLikesInput.checked = settings.captureLikes;
 	scrollDelayInput.value = String(settings.scrollDelayMs);
 	articleDirectBatchInput.value = String(settings.articleDirectBatch);
 	for (const input of document.querySelectorAll<HTMLInputElement>(
@@ -64,6 +72,8 @@ saveBtn.addEventListener("click", async () => {
 		serverUrl: serverUrlInput.value.trim() || "http://localhost:3000",
 		mode: selectedMode(),
 		autoSync: autoSyncInput.checked,
+		captureHistory: captureHistoryInput.checked,
+		captureLikes: captureLikesInput.checked,
 		scrollDelayMs: clampScrollDelayMs(Number(scrollDelayInput.value)),
 		articleDirectBatch: clampArticleDirectBatch(
 			Number(articleDirectBatchInput.value),

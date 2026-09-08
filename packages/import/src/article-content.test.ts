@@ -74,3 +74,21 @@ test('parseArticleContentFromRaw reads article data from stored tweet json', () 
   assert.ok(parsed)
   assert.equal(parsed.nodes.length, 5)
 })
+
+test('parseArticleContentFromRaw prefers _articleRaw over a tweet stub', () => {
+  const stub = {
+    rest_id: '2052734499319091384',
+    title: 'first principles thinking',
+    preview_text: 'Intro paragraph.',
+    content_state: { blocks: [{ type: 'unstyled', text: 'Intro paragraph.' }] },
+  }
+  const raw = JSON.stringify({
+    article: { article_results: { result: stub } },
+    _articleRaw: {
+      data: { article: { article_results: { result: sampleArticle } } },
+    },
+  })
+  const parsed = parseArticleContentFromRaw(raw)
+  assert.ok(parsed)
+  assert.equal(parsed.nodes.length, 5)
+})

@@ -44,39 +44,85 @@ function migrateItems(database: InstanceType<typeof Database>): void {
   database.exec(
     `CREATE INDEX IF NOT EXISTS items_capture_unavailable_at_idx ON items(capture_unavailable_at)`,
   )
-  database.exec(`
-    UPDATE items
-    SET sort_index = json_extract(raw_json, '$._sortIndex')
-    WHERE sort_index IS NULL
-      AND json_extract(raw_json, '$._sortIndex') IS NOT NULL
-  `)
-  database.exec(`
-    UPDATE items
-    SET content_type = 'article'
-    WHERE content_type = 'post'
-      AND json_extract(raw_json, '$.article.article_results.result.rest_id') IS NOT NULL
-  `)
-  database.exec(`
-    UPDATE items
-    SET url = 'https://x.com/i/article/' || json_extract(raw_json, '$.article.article_results.result.rest_id')
-    WHERE content_type = 'article'
-      AND json_extract(raw_json, '$.article.article_results.result.rest_id') IS NOT NULL
-      AND (url IS NULL OR url NOT LIKE '%/i/article/%')
-  `)
-  database.exec(`
-    UPDATE items
-    SET text = trim(
-      json_extract(raw_json, '$.article.article_results.result.title')
-      || char(10) || char(10)
-      || coalesce(json_extract(raw_json, '$.article.article_results.result.preview_text'), '')
-    )
-    WHERE content_type = 'article'
-      AND json_extract(raw_json, '$.article.article_results.result.content_state.blocks[0].text') IS NULL
-      AND json_extract(raw_json, '$.article.article_results.result.title') IS NOT NULL
-      AND text = json_extract(raw_json, '$.article.article_results.result.title')
-      AND json_extract(raw_json, '$.article.article_results.result.preview_text') IS NOT NULL
-  `)
+  if (names.has('raw_json')) {
+    database.exec(`
+      UPDATE items
+      SET sort_index = json_extract(raw_json, '$._sortIndex')
+      WHERE sort_index IS NULL
+        AND json_extract(raw_json, '$._sortIndex') IS NOT NULL
+    `)
+    database.exec(`
+      UPDATE items
+      SET content_type = 'article'
+      WHERE content_type = 'post'
+        AND json_extract(raw_json, '$.article.article_results.result.rest_id') IS NOT NULL
+    `)
+    database.exec(`
+      UPDATE items
+      SET url = 'https://x.com/i/article/' || json_extract(raw_json, '$.article.article_results.result.rest_id')
+      WHERE content_type = 'article'
+        AND json_extract(raw_json, '$.article.article_results.result.rest_id') IS NOT NULL
+        AND (url IS NULL OR url NOT LIKE '%/i/article/%')
+    `)
+    database.exec(`
+      UPDATE items
+      SET text = trim(
+        json_extract(raw_json, '$.article.article_results.result.title')
+        || char(10) || char(10)
+        || coalesce(json_extract(raw_json, '$.article.article_results.result.preview_text'), '')
+      )
+      WHERE content_type = 'article'
+        AND json_extract(raw_json, '$.article.article_results.result.content_state.blocks[0].text') IS NULL
+        AND json_extract(raw_json, '$.article.article_results.result.title') IS NOT NULL
+        AND text = json_extract(raw_json, '$.article.article_results.result.title')
+        AND json_extract(raw_json, '$.article.article_results.result.preview_text') IS NOT NULL
+    `)
+  }
   migrateImportQueue(database)
+  migrateItemRaw(database)
+}
+
+function migrateItemRaw(database: InstanceType<typeof Database>): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS item_raw (
+      source TEXT NOT NULL,
+      external_id TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      payload_bytes INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (source, external_id)
+    )
+  `)
+  const cols = database
+    .prepare(`PRAGMA table_info(items)`)
+    .all() as Array<{ name: string }>
+  if (!cols.some((col) => col.name === 'raw_json')) return
+
+  const now = Math.floor(Date.now() / 1000)
+  const select = database.prepare(
+    `SELECT source, external_id, raw_json FROM items WHERE raw_json IS NOT NULL`,
+  )
+  const insert = database.prepare(`
+    INSERT OR IGNORE INTO item_raw (source, external_id, payload, payload_bytes, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+  `)
+  const copy = database.transaction(() => {
+    for (const row of select.iterate() as Iterable<{
+      source: string
+      external_id: string
+      raw_json: string
+    }>) {
+      insert.run(
+        row.source,
+        row.external_id,
+        row.raw_json,
+        Buffer.byteLength(row.raw_json, 'utf8'),
+        now,
+      )
+    }
+  })
+  copy()
+  database.exec(`ALTER TABLE items DROP COLUMN raw_json`)
 }
 
 function migrateImportQueue(database: InstanceType<typeof Database>): void {

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Bookmark Processor Capture",
-  "version": "0.1.5",
-  "description": "Capture X bookmarks and likes, then download JSON or send to Bookmark Processor.",
+  "version": "0.1.7",
+  "description": "Capture X bookmarks, likes, and your replies, then download JSON or send to Bookmark Processor.",
   "permissions": ["storage", "unlimitedStorage", "activeTab", "alarms", "tabs"],
   "host_permissions": [
     "https://x.com/*",
@@ -19,35 +19,13 @@
   },
   "content_scripts": [
     {
-      "matches": [
-        "https://x.com/*/bookmarks*",
-        "https://x.com/i/bookmarks*",
-        "https://x.com/i/history*",
-        "https://x.com/i/article/*",
-        "https://x.com/*/likes*",
-        "https://twitter.com/*/bookmarks*",
-        "https://twitter.com/i/bookmarks*",
-        "https://twitter.com/i/history*",
-        "https://twitter.com/i/article/*",
-        "https://twitter.com/*/likes*"
-      ],
+      "matches": ["https://x.com/*", "https://twitter.com/*"],
       "js": ["capture-inject.js"],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
-      "matches": [
-        "https://x.com/*/bookmarks*",
-        "https://x.com/i/bookmarks*",
-        "https://x.com/i/history*",
-        "https://x.com/i/article/*",
-        "https://x.com/*/likes*",
-        "https://twitter.com/*/bookmarks*",
-        "https://twitter.com/i/bookmarks*",
-        "https://twitter.com/i/history*",
-        "https://twitter.com/i/article/*",
-        "https://twitter.com/*/likes*"
-      ],
+      "matches": ["https://x.com/*", "https://twitter.com/*"],
       "js": ["content.js"],
       "css": ["sidebar.css"],
       "run_at": "document_idle"
