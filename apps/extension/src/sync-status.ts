@@ -4,7 +4,7 @@ import type {
 	SyncStatusResponse,
 } from "@repo/import";
 import { markArticleRemoved } from "@repo/import";
-import type { CaptureState, ExportPayload } from "@repo/import/capture/engine";
+import type { CaptureState } from "@repo/import/capture/engine";
 import { idbGet, idbSet } from "./idb";
 import {
 	loadArticleQueue,
@@ -13,35 +13,24 @@ import {
 } from "./article-queue";
 
 const CAPTURE_KEY = "capture";
-const PENDING_UPLOAD_KEY = "pending-upload";
 
 export async function buildExtensionStatusReport(input: {
 	articles: ExtensionStatusReport["articles"];
 	articleQueue?: ExtensionStatusReport["articleQueue"];
 	importWorker?: ExtensionStatusReport["importWorker"];
-	timelineRunning?: boolean;
-	timelineCaptured?: number;
 	captureScrollActive?: boolean;
 	lastError?: string;
 }): Promise<ExtensionStatusReport> {
 	const capture = await idbGet<CaptureState>(CAPTURE_KEY);
-	const pendingUpload = await idbGet<{
-		payload: ExportPayload;
-		serverUrl: string;
-	}>(PENDING_UPLOAD_KEY);
 	const hydration = await loadHydrationState();
 
 	return {
 		capturedUnsynced: Object.keys(capture?.tweets ?? {}).length,
-		pendingUpload: Boolean(pendingUpload),
-		pendingUploadCount: pendingUpload
-			? Object.keys(pendingUpload.payload.tweets).length
-			: 0,
+		pendingUpload: (input.importWorker?.pending ?? 0) > 0,
+		pendingUploadCount: input.importWorker?.pending ?? 0,
 		articles: input.articles,
 		articleQueue: input.articleQueue,
 		importWorker: input.importWorker,
-		timelineRunning: input.timelineRunning,
-		timelineCaptured: input.timelineCaptured,
 		captureScrollActive: input.captureScrollActive,
 		rateLimitedUntil: hydration.rateLimitedUntil,
 		lastError: input.lastError,

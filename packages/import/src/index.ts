@@ -57,6 +57,10 @@ export {
   type PendingArticleRef,
 } from './article'
 export {
+  isRicherTweetPayload,
+  tweetPayloadScore,
+} from './tweet-richness'
+export {
   enableArticleBodyFieldToggles,
   graphqlOperationName,
   isArticleApiUrl,

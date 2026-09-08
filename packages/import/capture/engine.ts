@@ -16,6 +16,7 @@ import {
 	stampArticleRaw,
 	type GraphQLArticleResult,
 } from "../src/article";
+import { isRicherTweetPayload } from "../src/tweet-richness";
 import { applySortIndexes } from "../src/sort-index";
 import { isImportableTweet } from "../src/parse.ts";
 
@@ -268,6 +269,10 @@ export class CaptureEngine {
 				this.tweets[id] = article
 					? mergeArticleIntoTweet(existing, article)
 					: tweet;
+				this.onCountChange?.(this.tweetCount());
+				this.schedulePersist();
+			} else if (isRicherTweetPayload(tweet, existing)) {
+				this.tweets[id] = tweet;
 				this.onCountChange?.(this.tweetCount());
 				this.schedulePersist();
 			}

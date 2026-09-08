@@ -17,7 +17,6 @@ import {
 	createBackgroundStorageAdapter,
 	enqueueImportsInBackground,
 	fetchTotalInBackground,
-	type TimelineProgress,
 } from "./background-client";
 import { loadSettings } from "./storage";
 import {
@@ -27,7 +26,6 @@ import {
 	setSyncRetryVisible,
 	setSyncStatus,
 	showToast,
-	trackWorkerActivity,
 	type SidebarUiRefs,
 	unmountSidebarUi,
 	updateSidebarCount,
@@ -72,11 +70,7 @@ let syncQueued = false;
 let retryObserver: MutationObserver | null = null;
 let sessionImported = 0;
 let sessionSkipped = 0;
-let timelineWorkerRunning = false;
-let workerImported = 0;
-let workerSkipped = 0;
 let libraryArticlesMissing: number | null = null;
-let lastWorkerMessage = "";
 
 function reportCaptureScroll(active: boolean): void {
 	try {
@@ -84,15 +78,6 @@ function reportCaptureScroll(active: boolean): void {
 	} catch {
 		/* background unavailable */
 	}
-}
-
-function reportWorker(
-	message: string,
-	tone: "active" | "success" | "error" | "idle" = "active",
-): void {
-	if (!sidebar || message === lastWorkerMessage) return;
-	lastWorkerMessage = message;
-	trackWorkerActivity(sidebar, message, tone);
 }
 
 function applyArticleStats(stats: {
@@ -104,16 +89,6 @@ function applyArticleStats(stats: {
 }): void {
 	if (!sidebar) return;
 	setArticleStatus(sidebar, stats, libraryArticlesMissing);
-	const remaining = stats.pending + stats.fetching;
-	if (stats.fetching > 0) {
-		reportWorker(`Loading article · ${remaining} left`);
-	} else if (remaining > 0) {
-		reportWorker(`${remaining} articles queued`);
-	} else if (stats.failed > 0) {
-		reportWorker(`${stats.failed} articles retrying`, "error");
-	} else if (stats.total > 0) {
-		reportWorker("Articles complete", "success");
-	}
 }
 
 function renderSessionProgress(): void {
@@ -132,33 +107,6 @@ function trackPendingCount(count: number): void {
 	renderSessionProgress();
 }
 
-function applyTimelineProgress(progress: TimelineProgress): void {
-	timelineWorkerRunning = progress.running;
-	if (progress.imported > workerImported) {
-		sessionImported += progress.imported - workerImported;
-	}
-	if (progress.skipped > workerSkipped) {
-		sessionSkipped += progress.skipped - workerSkipped;
-	}
-	workerImported = Math.max(workerImported, progress.imported);
-	workerSkipped = Math.max(workerSkipped, progress.skipped);
-	if (sidebar && progress.libraryTotal != null) {
-		updateServerTotal(sidebar, progress.libraryTotal);
-	}
-	if (progress.error && sidebar) {
-		setSyncStatus(sidebar, progress.error);
-		reportWorker(progress.error, "error");
-	} else {
-		renderSessionProgress();
-		reportWorker(
-			progress.running
-				? `History page ${progress.pages} · ${progress.imported + progress.skipped} synced`
-				: "History pagination complete",
-			progress.running ? "active" : "success",
-		);
-	}
-}
-
 function applyImportProgress(progress: ImportWorkerProgress): void {
 	if (progress.completedIds?.length && engine) {
 		engine.removeSynced(progress.completedIds);
@@ -174,20 +122,10 @@ function applyImportProgress(progress: ImportWorkerProgress): void {
 
 	if (progress.lastError) {
 		setSyncRetryVisible(sidebar, true);
-		reportWorker(`Import paused · ${progress.lastError}`, "error");
+		setSyncStatus(sidebar, "Background import paused — retrying");
 		return;
 	}
 	setSyncRetryVisible(sidebar, false);
-	if (progress.processingId) {
-		reportWorker(`Importing 1 item · ${progress.pending} queued`);
-	} else if (progress.pending > 0) {
-		reportWorker(`${progress.pending} items queued in background`);
-	} else if ((progress.importedDelta ?? 0) + (progress.skippedDelta ?? 0) > 0) {
-		reportWorker(
-			`Synced · ${progress.importedDelta ?? 0} new · ${progress.skippedDelta ?? 0} skipped`,
-			"success",
-		);
-	}
 }
 
 function enqueueCapturedArticles(): void {
@@ -376,8 +314,9 @@ function clearSyncTimer(): void {
 }
 
 function scheduleAutoSync(): void {
-	void loadSettings()
-		.then((settings) => {
+	void (async () => {
+		try {
+			const settings = await loadSettings();
 			if (!settings.autoSync || settings.mode !== "api" || !settings.serverUrl) {
 				return;
 			}
@@ -391,10 +330,10 @@ function scheduleAutoSync(): void {
 				syncTimer = null;
 				void performSync({ auto: true });
 			}, SYNC_INTERVAL_MS);
-		})
-		.catch(() => {
+		} catch {
 			/* extension reloaded while this tab was open */
-		});
+		}
+	})();
 }
 
 function startRetryWatcher(): void {
@@ -453,7 +392,6 @@ async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
 	clearSyncTimer();
 	syncing = true;
 	setSyncRetryVisible(sidebar, false);
-	reportWorker(`Queueing ${pendingCount} items for background import`);
 
 	try {
 		const progress = await enqueueImportsInBackground(
@@ -463,23 +401,15 @@ async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
 		if (progress.lastError) {
 			workerPaused = true;
 			setSyncStatus(sidebar, "Background import paused — retrying");
-			reportWorker(`Import paused · ${progress.lastError}`, "error");
 			setSyncRetryVisible(sidebar, true);
 			return;
 		}
 		renderSessionProgress();
-		reportWorker(
-			progress.pending > 0
-				? `${progress.pending} items queued in background`
-				: "Background import complete",
-			progress.pending > 0 ? "active" : "success",
-		);
 		setSyncRetryVisible(sidebar, false);
 	} catch (err) {
 		workerPaused = true;
 		const msg = err instanceof Error ? err.message : "Sync failed";
 		setSyncStatus(sidebar, "Sync failed — click Retry or wait");
-		reportWorker(`Upload failed · ${msg}`, "error");
 		setSyncRetryVisible(sidebar, true);
 		if (opts.manual || !opts.auto) showToast(msg);
 		if (settings.autoSync && engine.tweetCount() > 0) {
@@ -500,10 +430,6 @@ async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
 
 function handleAutoScroll(): void {
 	if (!engine || !sidebar) return;
-	if (timelineWorkerRunning) {
-		timelineWorkerRunning = false;
-		void chrome.runtime.sendMessage({ type: "bp-timeline-cancel" });
-	}
 	if (autoScrolling) {
 		autoScrolling = false;
 		stopRetryWatcher();
@@ -515,9 +441,10 @@ function handleAutoScroll(): void {
 	reportCaptureScroll(true);
 	startRetryWatcher();
 	setAutoScrollUi(sidebar, "running");
-	void loadSettings().then((settings) => {
+	void (async () => {
+		const settings = await loadSettings();
 		if (!engine || !sidebar) return;
-		void runAutoScroll(
+		await runAutoScroll(
 			engine,
 			(_count, done) => {
 				if (!sidebar || !engine) return;
@@ -540,7 +467,19 @@ function handleAutoScroll(): void {
 				onStagnant: recoverTimeline,
 			},
 		);
-	});
+	})();
+}
+
+async function refreshArticleStats(): Promise<void> {
+	try {
+		const response = await chrome.runtime.sendMessage({
+			type: "bp-article-stats-request",
+		});
+		const stats = response?.result?.stats ?? response?.stats;
+		if (stats) applyArticleStats(stats);
+	} catch {
+		/* background unavailable */
+	}
 }
 
 function mountUi(): void {
@@ -561,15 +500,7 @@ function mountUi(): void {
 			uiMounted = true;
 			renderSessionProgress();
 			void refreshServerTotal();
-			void chrome.runtime
-				.sendMessage({ type: "bp-article-stats-request" })
-				.then((response) => {
-					const stats = response?.result?.stats ?? response?.stats;
-					if (stats) applyArticleStats(stats);
-				})
-				.catch(() => {
-					/* ignore */
-				});
+			void refreshArticleStats();
 		},
 	);
 }
@@ -580,10 +511,6 @@ async function startCapture(): Promise<void> {
 		showToast("Capture already active");
 		return;
 	}
-	// Auto-scroll is the capture mechanism; discard any legacy background
-	// pagination job so it cannot stop or compete with the visible scroll.
-	void chrome.runtime.sendMessage({ type: "bp-timeline-cancel" });
-
 	engine = new CaptureEngine({
 		storage: createBackgroundStorageAdapter(),
 		storeResponses: false,
@@ -632,11 +559,7 @@ async function stopCapture(): Promise<void> {
 	syncQueued = false;
 	sessionImported = 0;
 	sessionSkipped = 0;
-	timelineWorkerRunning = false;
-	workerImported = 0;
-	workerSkipped = 0;
 	libraryArticlesMissing = null;
-	lastWorkerMessage = "";
 	showToast("Capture stopped");
 }
 
@@ -644,17 +567,19 @@ function registerMessageListener(): void {
 	try {
 		chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 			if (message?.type === "bp-toggle-capture") {
-				void (engine ? stopCapture() : startCapture())
-					.then(() => {
+				void (async () => {
+					try {
+						if (engine) await stopCapture();
+						else await startCapture();
 						try {
 							sendResponse({ active: Boolean(engine) });
 						} catch {
 							/* context invalidated */
 						}
-					})
-					.catch(() => {
+					} catch {
 						/* ignore */
-					});
+					}
+				})();
 				return true;
 			}
 			if (message?.type === "bp-article-stats") {
@@ -663,16 +588,7 @@ function registerMessageListener(): void {
 			}
 			if (message?.type === "bp-library-article-count") {
 				libraryArticlesMissing = Number(message.count);
-				void chrome.runtime
-					.sendMessage({ type: "bp-article-stats-request" })
-					.then((response) => {
-						const stats = response?.result?.stats ?? response?.stats;
-						if (stats) applyArticleStats(stats);
-					});
-				return false;
-			}
-			if (message?.type === "bp-timeline-progress") {
-				if (message.progress) applyTimelineProgress(message.progress);
+				void refreshArticleStats();
 				return false;
 			}
 			if (message?.type === "bp-import-progress") {

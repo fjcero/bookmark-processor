@@ -7,15 +7,12 @@ import {
 	enqueueArticles,
 	isRateLimited,
 	markArticleFailure,
-	markArticleFetching,
 	markArticleRateLimited,
 	markArticleRemoved,
 	markArticleSuccess,
 	msUntilHydrationAllowed,
 	nextQueueWakeAt,
 	parseRetryAfterMs,
-	pendingArticleFromRaw,
-	pickNextArticle,
 	retryFailedArticles,
 	articleUrl,
 	findHydratedArticleResult,
@@ -38,20 +35,22 @@ import {
 import type { CaptureEventDetail } from "@repo/import/capture/hooks-events";
 import {
 	ALARM_NAME,
+	claimNextArticle,
 	loadArticleQueue,
 	loadHydrationState,
 	noteArticleCompleted,
 	noteRateLimited,
+	releaseArticleLease,
+	updateHydrationState,
 	updateArticleQueue,
 } from "./article-queue";
 import { idbDelete, idbGet, idbSet } from "./idb";
 import {
-	drainImportQueue,
 	enqueueImportPayload,
 	IMPORT_QUEUE_ALARM,
 	importWorkerProgress,
 	loadImportWorkerState,
-	setImportWorkerProgressListener,
+	processNextImport,
 } from "./import-worker";
 import {
 	createArticleRequestTemplate,
@@ -60,13 +59,6 @@ import {
 } from "./article-replay";
 import { loadSettings } from "./storage";
 import {
-	collectTimelineTweets,
-	createTimelineJob,
-	findBottomCursor,
-	requestForCursor,
-	type TimelineJob,
-} from "./timeline-pagination";
-import {
 	applySyncRevocations,
 	buildExtensionStatusReport,
 	postSyncStatus,
@@ -74,17 +66,14 @@ import {
 
 const CAPTURE_KEY = "capture";
 const PENDING_UPLOAD_KEY = "pending-upload";
-const SYNC_RETRY_ALARM = "bp-sync-retry";
 const SYNC_STATUS_ALARM = "bp-sync-status";
+const SYNC_STATUS_PUSH_ALARM = "bp-sync-status-push";
+const SYNC_STATUS_ERROR_KEY = "bp-sync-status-error";
 const LEGACY_STORAGE_KEY = "x-export-v2-state";
 const ARTICLE_TABS_KEY = "article-tabs";
 const ARTICLE_WORKER_TAB_KEY = "article-worker-tab";
 const ARTICLE_TEMPLATE_KEY = "article-request-template";
 const ARTICLE_TIMEOUT_PREFIX = "bp-article-timeout:";
-const TIMELINE_JOB_KEY = "timeline-job";
-const TIMELINE_ALARM = "bp-timeline-page";
-const TIMELINE_PAGES_PER_RUN = 8;
-const TIMELINE_UPLOAD_BATCH = 20;
 
 interface OpenedArticleTab {
 	tabId: number;
@@ -93,18 +82,7 @@ interface OpenedArticleTab {
 	url: string;
 }
 
-const CAPTURE_BUSY_RETRY_MS = 60_000;
-const ARTICLE_TAB_LOAD_MS = 30_000;
-
-let bootstrapped = false;
-let hydrating = false;
-let timelineRunning = false;
-let timelineCancelled = false;
-let tabEnsureInFlight: Promise<number | null> | null = null;
-let hydrationChain: Promise<void> = Promise.resolve();
-/** Bookmarks tab is auto-scrolling; avoid opening article tabs in the same window. */
-let captureScrollActive = false;
-let statusReportTimer: ReturnType<typeof setTimeout> | null = null;
+const CAPTURE_SCROLL_KEY = "bp-capture-scroll-active";
 
 async function broadcastLibraryArticleCount(count: number): Promise<void> {
 	const tabs = await chrome.tabs.query({
@@ -130,17 +108,16 @@ async function syncWithServer(lastError?: string): Promise<void> {
 	const settings = await loadSettings();
 	if (settings.mode !== "api" || !settings.serverUrl) return;
 
-	const timeline = await idbGet<TimelineJob>(TIMELINE_JOB_KEY);
 	const queue = await loadArticleQueue();
 	const importWorker = await loadImportWorkerState();
+	const captureScrollActive =
+		(await idbGet<boolean>(CAPTURE_SCROLL_KEY)) ?? false;
 	const report = await buildExtensionStatusReport({
 		articles: articleQueueStats(queue),
 		articleQueue: queue
 			.filter((item) => item.status !== "ok")
 			.slice(0, 100),
 		importWorker: importWorkerProgress(importWorker),
-		timelineRunning,
-		timelineCaptured: timeline?.captured,
 		captureScrollActive,
 		lastError,
 	});
@@ -158,32 +135,36 @@ async function syncWithServer(lastError?: string): Promise<void> {
 }
 
 function scheduleSyncStatusPush(lastError?: string): void {
-	if (statusReportTimer) return;
-	statusReportTimer = setTimeout(() => {
-		statusReportTimer = null;
-		void syncWithServer(lastError);
-	}, 3000);
+	void (async () => {
+		if (lastError) await idbSet(SYNC_STATUS_ERROR_KEY, lastError);
+		const existing = await chrome.alarms.get(SYNC_STATUS_PUSH_ALARM);
+		if (existing) return;
+		await chrome.alarms.create(SYNC_STATUS_PUSH_ALARM, {
+			when: Date.now() + 30_000,
+		});
+	})();
 }
 
-setImportWorkerProgressListener((progress) => {
-	scheduleSyncStatusPush(progress.lastError);
-});
-
 async function bootstrapArticles(): Promise<void> {
-	if (bootstrapped) return;
-	bootstrapped = true;
 	await recoverInterruptedArticles();
 	await ingestPendingFromServer();
 	await scheduleNext(5_000);
 	void syncWithServer();
 }
 
+async function migrateLegacyPendingUpload(): Promise<void> {
+	const pending = await idbGet<{
+		payload: ExportPayload;
+		serverUrl: string;
+	}>(PENDING_UPLOAD_KEY);
+	if (!pending) return;
+	await enqueueImportPayload(pending.payload, pending.serverUrl);
+	await idbDelete(PENDING_UPLOAD_KEY);
+	await chrome.alarms.clear("bp-sync-retry");
+}
+
 function queueHydration(): void {
-	hydrationChain = hydrationChain
-		.then(() => hydrateNext())
-		.catch(() => {
-			/* next tick */
-		});
+	void hydrateNext();
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -191,51 +172,10 @@ chrome.runtime.onInstalled.addListener(() => {
 		/* ignore */
 	});
 	void chrome.alarms.create(SYNC_STATUS_ALARM, { periodInMinutes: 1 });
-	void drainImportQueue();
+	void migrateLegacyPendingUpload();
+	void processNextImport();
 	void bootstrapArticles();
 });
-
-async function removeSyncedFromCapture(payload: ExportPayload): Promise<void> {
-	const state = await idbGet<CaptureState>(CAPTURE_KEY);
-	if (!state?.tweets) return;
-	for (const id of Object.keys(payload.tweets)) {
-		delete state.tweets[id];
-	}
-	await idbSet(CAPTURE_KEY, state);
-}
-
-async function syncPayload(input: {
-	payload: ExportPayload;
-	serverUrl: string;
-}): Promise<{ imported: number; skipped: number; total: number | null }> {
-	await idbSet(PENDING_UPLOAD_KEY, input);
-	try {
-		const result = await uploadPayload(input.payload, input.serverUrl);
-		await removeSyncedFromCapture(input.payload);
-		await idbDelete(PENDING_UPLOAD_KEY);
-		await chrome.alarms.clear(SYNC_RETRY_ALARM);
-		scheduleSyncStatusPush();
-		return result;
-	} catch (err) {
-		await chrome.alarms.create(SYNC_RETRY_ALARM, { delayInMinutes: 1 });
-		scheduleSyncStatusPush(err instanceof Error ? err.message : "Sync failed");
-		throw err;
-	}
-}
-
-async function retryPendingUpload(): Promise<void> {
-	const pending = await idbGet<{ payload: ExportPayload; serverUrl: string }>(
-		PENDING_UPLOAD_KEY,
-	);
-	if (!pending) return;
-	try {
-		await uploadPayload(pending.payload, pending.serverUrl);
-		await removeSyncedFromCapture(pending.payload);
-		await idbDelete(PENDING_UPLOAD_KEY);
-	} catch {
-		await chrome.alarms.create(SYNC_RETRY_ALARM, { delayInMinutes: 1 });
-	}
-}
 
 async function loadOpenedTabs(): Promise<OpenedArticleTab[]> {
 	return (await idbGet<OpenedArticleTab[]>(ARTICLE_TABS_KEY)) ?? [];
@@ -258,43 +198,6 @@ async function removeOpenedTab(tabId: number): Promise<OpenedArticleTab | undefi
 	return opened;
 }
 
-async function waitForTabLoad(
-	tabId: number,
-	timeoutMs: number,
-	expectUrl?: string,
-): Promise<void> {
-	await new Promise<void>((resolve, reject) => {
-		let settled = false;
-		const finish = (error?: Error) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timeout);
-			chrome.tabs.onUpdated.removeListener(listener);
-			if (error) reject(error);
-			else resolve();
-		};
-		const matches = (tabUrl?: string) =>
-			!expectUrl || (tabUrl != null && tabUrl.startsWith(expectUrl));
-		const timeout = setTimeout(() => {
-			finish(new Error("Article tab load timeout"));
-		}, timeoutMs);
-		const listener = (
-			updatedTabId: number,
-			info: chrome.tabs.TabChangeInfo,
-			tab: chrome.tabs.Tab,
-		) => {
-			if (updatedTabId !== tabId || info.status !== "complete") return;
-			if (matches(tab.url)) finish();
-		};
-		chrome.tabs.onUpdated.addListener(listener);
-		void chrome.tabs.get(tabId).then((existing) => {
-			if (existing.status === "complete" && matches(existing.url)) finish();
-		}, () => {
-			finish(new Error("Article tab closed"));
-		});
-	});
-}
-
 async function loadWorkerTabId(): Promise<number | null> {
 	return (await idbGet<number>(ARTICLE_WORKER_TAB_KEY)) ?? null;
 }
@@ -309,60 +212,52 @@ async function saveWorkerTabId(tabId: number | null): Promise<void> {
 
 /** Open or reuse one background worker tab without stealing focus. */
 async function ensureHydrationTab(url: string): Promise<number | null> {
-	if (tabEnsureInFlight) return tabEnsureInFlight;
-	tabEnsureInFlight = (async () => {
+	const opened = await loadOpenedTabs();
+	if (opened.length > 0) {
+		const entry = opened[0]!;
 		try {
-			const opened = await loadOpenedTabs();
-			if (opened.length > 0) {
-				const entry = opened[0]!;
-				try {
-					await chrome.tabs.get(entry.tabId);
-					await chrome.tabs.update(entry.tabId, { url, active: false });
-					await keepWorkerTabWarm(entry.tabId);
-					await saveWorkerTabId(entry.tabId);
-					return entry.tabId;
-				} catch {
-					await saveOpenedTabs([]);
-					await saveWorkerTabId(null);
-				}
-			}
-
-			const savedId = await loadWorkerTabId();
-			if (savedId != null) {
-				try {
-					await chrome.tabs.get(savedId);
-					await chrome.tabs.update(savedId, { url, active: false });
-					await keepWorkerTabWarm(savedId);
-					return savedId;
-				} catch {
-					await saveWorkerTabId(null);
-				}
-			}
-
-			const [active] = await chrome.tabs.query({
-				active: true,
-				currentWindow: true,
-			});
-			const windowId = active?.windowId;
-			const siblings =
-				windowId != null
-					? await chrome.tabs.query({ windowId })
-					: await chrome.tabs.query({ currentWindow: true });
-			const tab = await chrome.tabs.create({
-				url,
-				active: false,
-				windowId,
-				index: siblings.length,
-			});
-			if (!tab.id) return null;
-			await keepWorkerTabWarm(tab.id);
-			await saveWorkerTabId(tab.id);
-			return tab.id;
-		} finally {
-			tabEnsureInFlight = null;
+			await chrome.tabs.get(entry.tabId);
+			await chrome.tabs.update(entry.tabId, { url, active: false });
+			await keepWorkerTabWarm(entry.tabId);
+			await saveWorkerTabId(entry.tabId);
+			return entry.tabId;
+		} catch {
+			await saveOpenedTabs([]);
+			await saveWorkerTabId(null);
 		}
-	})();
-	return tabEnsureInFlight;
+	}
+
+	const savedId = await loadWorkerTabId();
+	if (savedId != null) {
+		try {
+			await chrome.tabs.get(savedId);
+			await chrome.tabs.update(savedId, { url, active: false });
+			await keepWorkerTabWarm(savedId);
+			return savedId;
+		} catch {
+			await saveWorkerTabId(null);
+		}
+	}
+
+	const [active] = await chrome.tabs.query({
+		active: true,
+		currentWindow: true,
+	});
+	const windowId = active?.windowId;
+	const siblings =
+		windowId != null
+			? await chrome.tabs.query({ windowId })
+			: await chrome.tabs.query({ currentWindow: true });
+	const tab = await chrome.tabs.create({
+		url,
+		active: false,
+		windowId,
+		index: siblings.length,
+	});
+	if (!tab.id) return null;
+	await keepWorkerTabWarm(tab.id);
+	await saveWorkerTabId(tab.id);
+	return tab.id;
 }
 
 async function keepWorkerTabWarm(tabId: number): Promise<void> {
@@ -405,14 +300,21 @@ async function recoverInterruptedArticles(): Promise<void> {
 	}
 	await saveOpenedTabs(active);
 	const activeIds = new Set(active.map((entry) => entry.articleId));
-	await updateArticleQueue((items) => {
-		for (const item of items) {
+	await updateHydrationState((state) => {
+		for (const item of state.queue) {
 			if (item.status !== "fetching" || activeIds.has(item.articleId)) continue;
 			item.status = "pending";
 			item.nextAt = undefined;
 			item.lastError = "Background worker restarted";
 		}
-		return items;
+		if (
+			state.processingArticleId &&
+			!activeIds.has(state.processingArticleId)
+		) {
+			state.processingArticleId = undefined;
+			state.leaseUntil = undefined;
+		}
+		return state;
 	});
 }
 
@@ -421,7 +323,8 @@ async function scheduleNext(delayMs = ARTICLE_GAP_MS): Promise<void> {
 	const now = Date.now();
 	const wait = Math.max(delayMs, msUntilHydrationAllowed(state, now));
 	const wake = nextQueueWakeAt(state.queue, state, now);
-	const when = now + Math.max(wait, wake ?? 0);
+	// MV3 alarms floor at ~30s; that is the effective article gap.
+	const when = now + Math.max(30_000, wait, wake ?? 0);
 	try {
 		await chrome.alarms.create(ALARM_NAME, { when });
 	} catch {
@@ -451,162 +354,6 @@ async function broadcastStats(): Promise<void> {
 		/* no listeners */
 	}
 	scheduleSyncStatusPush();
-}
-
-async function broadcastTimelineProgress(
-	job: TimelineJob,
-	running: boolean,
-	error?: string,
-	libraryTotal?: number | null,
-): Promise<void> {
-	try {
-		const tabs = await chrome.tabs.query({
-			url: ["https://x.com/*", "https://twitter.com/*"],
-		});
-		await Promise.all(
-			tabs
-				.filter((tab) => tab.id != null)
-				.map((tab) =>
-					chrome.tabs
-						.sendMessage(tab.id!, {
-							type: "bp-timeline-progress",
-							progress: {
-								captured: job.captured,
-								imported: job.imported,
-								skipped: job.skipped,
-								pages: job.pages,
-								running,
-								error,
-								libraryTotal,
-							},
-						})
-						.catch(() => {
-							/* no content script in this tab */
-						}),
-				),
-		);
-	} catch {
-		/* no matching tabs */
-	}
-}
-
-async function enqueueArticlesFromTweets(
-	tweets: Record<string, unknown>,
-): Promise<void> {
-	const articles = Object.entries(tweets)
-		.map(([tweetId, tweet]) =>
-			pendingArticleFromRaw(tweetId, JSON.stringify(tweet), null),
-		)
-		.filter((item): item is NonNullable<typeof item> => item != null);
-	if (articles.length === 0) return;
-	await updateArticleQueue((queue) => enqueueArticles(queue, articles));
-	await broadcastStats();
-	await scheduleNext();
-}
-
-async function runTimelinePages(): Promise<void> {
-	if (timelineRunning) return;
-	timelineRunning = true;
-	timelineCancelled = false;
-	try {
-		let job = await idbGet<TimelineJob>(TIMELINE_JOB_KEY);
-		if (!job) return;
-		if (isGraphqlWriteOperation(job.request.url)) {
-			await idbDelete(TIMELINE_JOB_KEY);
-			await chrome.alarms.clear(TIMELINE_ALARM);
-			return;
-		}
-		const settings = await loadSettings();
-		if (settings.mode !== "api" || !settings.serverUrl) return;
-
-		for (let page = 0; page < TIMELINE_PAGES_PER_RUN; page++) {
-			if (timelineCancelled) return;
-			const replay = requestForCursor(job, job.cursor);
-			const response = await fetch(replay.url, {
-				method: job.request.method,
-				headers: job.request.headers,
-				body: job.request.method === "GET" ? undefined : replay.body,
-				credentials: "include",
-			});
-			if (!response.ok) {
-				throw new Error(`X timeline request failed (${response.status})`);
-			}
-			const data = await response.json();
-			const tweets = collectTimelineTweets(data);
-			const entries = Object.entries(tweets);
-			let libraryTotal: number | null = null;
-
-			for (let index = 0; index < entries.length; index += TIMELINE_UPLOAD_BATCH) {
-				const batch = Object.fromEntries(
-					entries.slice(index, index + TIMELINE_UPLOAD_BATCH),
-				);
-				const capturedAt = new Date().toISOString();
-				const result = await uploadPayload(
-					{
-						exportVersion: 2,
-						exportedAt: capturedAt,
-						source: job.source,
-						origin: "x-background-pagination",
-						page: {
-							url: job.pageUrl,
-							pathname: new URL(job.pageUrl).pathname,
-						},
-						stats: {
-							tweetCount: Object.keys(batch).length,
-							responseCount: 1,
-						},
-						tweets: batch,
-						responses: [
-							{
-								url: replay.url,
-								method: job.request.method,
-								capturedAt,
-								data,
-							},
-						],
-					},
-					settings.serverUrl,
-				);
-				const accounted = result.imported + result.skipped;
-				job.imported += result.imported;
-				job.skipped += result.skipped;
-				libraryTotal = result.total;
-				job.captured += accounted;
-			}
-
-			job.pages += 1;
-			await enqueueArticlesFromTweets(tweets);
-			const nextCursor = findBottomCursor(data);
-			if (!nextCursor || nextCursor === job.cursor) {
-				await idbDelete(TIMELINE_JOB_KEY);
-				await chrome.alarms.clear(TIMELINE_ALARM);
-				await broadcastTimelineProgress(job, false, undefined, libraryTotal);
-				return;
-			}
-
-			job.cursor = nextCursor;
-			await idbSet(TIMELINE_JOB_KEY, job);
-			await broadcastTimelineProgress(job, true, undefined, libraryTotal);
-		}
-
-		await chrome.alarms.create(TIMELINE_ALARM, {
-			when: Date.now() + 30_000,
-		});
-	} catch (error) {
-		const job = await idbGet<TimelineJob>(TIMELINE_JOB_KEY);
-		if (job) {
-			await broadcastTimelineProgress(
-				job,
-				false,
-				error instanceof Error ? error.message : String(error),
-			);
-			await chrome.alarms.create(TIMELINE_ALARM, {
-				when: Date.now() + 30_000,
-			});
-		}
-	} finally {
-		timelineRunning = false;
-	}
 }
 
 async function ingestPendingFromServer(): Promise<void> {
@@ -664,6 +411,7 @@ async function handleArticleUnavailable(
 	}
 
 	await updateArticleQueue((items) => markArticleRemoved(items, articleId));
+	await releaseArticleLease(articleId);
 	await broadcastStats();
 	await scheduleNext();
 	return true;
@@ -690,21 +438,22 @@ async function hydrateArticleDirect(
 			credentials: "include",
 		});
 		if (response.status === 429) {
-			const state = await loadHydrationState();
 			const delay = parseRetryAfterMs(
 				response.headers.get("retry-after"),
 				ARTICLE_RATE_LIMIT_MS,
 			);
 			await noteRateLimited(delay);
+			const limited = await loadHydrationState();
 			await updateArticleQueue((items) =>
 				markArticleRateLimited(
 					items,
 					next.articleId,
 					"X rate limited article request (429)",
 					Date.now(),
-					state.rateLimitHits ?? 1,
+					limited.rateLimitHits ?? 1,
 				),
 			);
+			await releaseArticleLease(next.articleId);
 			await broadcastStats();
 			await scheduleNext(delay);
 			return "retry";
@@ -738,6 +487,7 @@ async function hydrateArticleDirect(
 			markArticleSuccess(items, next.articleId),
 		);
 		await noteArticleCompleted();
+		await releaseArticleLease(next.articleId);
 		await broadcastStats();
 		await scheduleNext();
 		return "ok";
@@ -747,94 +497,69 @@ async function hydrateArticleDirect(
 }
 
 async function hydrateNext(): Promise<void> {
-	if (hydrating || (await loadOpenedTabs()).length > 0) return;
+	if ((await loadOpenedTabs()).length > 0) return;
 	const state = await loadHydrationState();
 	if (isRateLimited(state)) {
 		await scheduleNext(msUntilHydrationAllowed(state));
 		return;
 	}
-	hydrating = true;
-	try {
-		const queue = await loadArticleQueue();
-		let next = pickNextArticle(queue);
-		if (!next) {
-			await ingestPendingFromServer();
-			const refreshed = await loadArticleQueue();
-			next = pickNextArticle(refreshed);
-			if (!next && refreshed.some((item) => item.status === "fetching")) {
-				await scheduleNext(5_000);
-				return;
-			}
-			const wake = nextQueueWakeAt(refreshed, await loadHydrationState());
-			if (!next && wake != null) {
-				await scheduleNext(wake);
-				return;
-			}
-			if (!next && refreshed.some((item) => item.status === "failed")) {
-				await scheduleNext(ARTICLE_POLL_IDLE_MS);
-				return;
-			}
+
+	let next = await claimNextArticle();
+	if (!next) {
+		await ingestPendingFromServer();
+		next = await claimNextArticle();
+	}
+	if (!next) {
+		const refreshed = await loadHydrationState();
+		if (refreshed.queue.some((item) => item.status === "fetching")) {
+			await scheduleNext(5_000);
+			return;
 		}
-		if (!next) {
+		const wake = nextQueueWakeAt(refreshed.queue, refreshed);
+		if (wake != null) {
+			await scheduleNext(wake);
+			return;
+		}
+		if (refreshed.queue.some((item) => item.status === "failed")) {
 			await scheduleNext(ARTICLE_POLL_IDLE_MS);
 			return;
 		}
+		await scheduleNext(ARTICLE_POLL_IDLE_MS);
+		return;
+	}
 
-		await updateArticleQueue((items) => markArticleFetching(items, next.articleId));
-		await broadcastStats();
+	await broadcastStats();
 
-		try {
-			const direct = await hydrateArticleDirect(next);
-			if (direct === "ok" || direct === "unavailable" || direct === "retry") {
-				return;
-			}
-			if (captureScrollActive) {
-				await updateArticleQueue((items) => {
-					const item = items.find((entry) => entry.articleId === next.articleId);
-					if (item?.status === "fetching") {
-						item.status = "pending";
-						item.attempts = Math.max(0, item.attempts - 1);
-					}
-					return items;
-				});
-				await broadcastStats();
-				await scheduleNext(CAPTURE_BUSY_RETRY_MS);
-				return;
-			}
-			const tabId = await ensureHydrationTab(next.url);
-			if (tabId == null) {
-				await updateArticleQueue((items) =>
-					markArticleFailure(items, next.articleId, "Failed to open tab"),
-				);
-				await scheduleNext();
-				return;
-			}
-			await saveOpenedTabs([{
-				tabId,
-				articleId: next.articleId,
-				tweetId: next.tweetId,
-				url: next.url,
-			}]);
-			await chrome.alarms.create(`${ARTICLE_TIMEOUT_PREFIX}${tabId}`, {
-				when: Date.now() + ARTICLE_TAB_TIMEOUT_MS,
-			});
-			try {
-				await waitForTabLoad(tabId, ARTICLE_TAB_LOAD_MS, next.url);
-			} catch {
-				const refreshed = await loadArticleQueue();
-				const item = refreshed.find((entry) => entry.articleId === next.articleId);
-				if (item?.status === "ok") return;
-				if (!(await findOpenedTab(tabId))) return;
-			}
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : "Failed to open article tab";
-			await updateArticleQueue((items) =>
-				markArticleFailure(items, next.articleId, msg),
-			);
-			await scheduleNext();
+	try {
+		const direct = await hydrateArticleDirect(next);
+		if (direct === "ok" || direct === "unavailable" || direct === "retry") {
+			return;
 		}
-	} finally {
-		hydrating = false;
+		const tabId = await ensureHydrationTab(next.url);
+		if (tabId == null) {
+			await updateArticleQueue((items) =>
+				markArticleFailure(items, next.articleId, "Failed to open tab"),
+			);
+			await releaseArticleLease(next.articleId);
+			await scheduleNext();
+			return;
+		}
+		await saveOpenedTabs([{
+			tabId,
+			articleId: next.articleId,
+			tweetId: next.tweetId,
+			url: next.url,
+		}]);
+		await chrome.alarms.create(`${ARTICLE_TIMEOUT_PREFIX}${tabId}`, {
+			when: Date.now() + ARTICLE_TAB_TIMEOUT_MS,
+		});
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : "Failed to open article tab";
+		await updateArticleQueue((items) =>
+			markArticleFailure(items, next.articleId, msg),
+		);
+		await releaseArticleLease(next.articleId);
+		await scheduleNext();
 	}
 }
 
@@ -851,6 +576,7 @@ async function failTab(tabId: number, error: string): Promise<void> {
 	await updateArticleQueue((items) =>
 		markArticleFailure(items, opened.articleId, error),
 	);
+	await releaseArticleLease(opened.articleId);
 	await broadcastStats();
 	await scheduleNext();
 }
@@ -900,6 +626,7 @@ async function captureArticleBody(
 		await uploadPayload(payload, settings.serverUrl);
 		await updateArticleQueue((items) => markArticleSuccess(items, articleId));
 		await noteArticleCompleted();
+		await releaseArticleLease(articleId);
 		if (tabId != null) await closeHydrationTab(tabId);
 		await broadcastStats();
 		await scheduleNext();
@@ -909,9 +636,11 @@ async function captureArticleBody(
 	}
 }
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-	void (async () => {
-		switch (message?.type) {
+async function handleWorkerMessage(
+	message: Record<string, unknown>,
+	sender: chrome.runtime.MessageSender,
+): Promise<unknown> {
+	switch (message.type) {
 			case "bp-state-load":
 				return { state: await idbGet<CaptureState>(CAPTURE_KEY) };
 			case "bp-state-save":
@@ -920,41 +649,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 			case "bp-state-clear":
 				await idbDelete(CAPTURE_KEY);
 				return { ok: true };
-			case "bp-sync":
-				return await syncPayload({
-					payload: message.payload as ExportPayload,
-					serverUrl: String(message.serverUrl),
-				});
 			case "bp-import-enqueue": {
 				await enqueueImportPayload(
 					message.payload as ExportPayload,
 					String(message.serverUrl),
 				);
-				const state = await drainImportQueue();
+				const state = await processNextImport();
 				scheduleSyncStatusPush(state.lastError);
 				return importWorkerProgress(state);
 			}
 			case "bp-fetch-total":
 				return { total: await fetchServerTotal(String(message.serverUrl)) };
-			case "bp-timeline-seed": {
-				const candidate = createTimelineJob(
-					message.detail as CaptureEventDetail,
-					message.source,
-					String(message.pageUrl),
-				);
-				if (!candidate) return { accepted: false };
-				const existing = await idbGet<TimelineJob>(TIMELINE_JOB_KEY);
-				if (existing) {
-					existing.request = candidate.request;
-					existing.pageUrl = candidate.pageUrl;
-					await idbSet(TIMELINE_JOB_KEY, existing);
-					await runTimelinePages();
-					return { accepted: true, progress: existing };
-				}
-				await idbSet(TIMELINE_JOB_KEY, candidate);
-				await runTimelinePages();
-				return { accepted: true, progress: candidate };
-			}
 			case "bp-enqueue-articles": {
 				const incoming = Array.isArray(message.articles) ? message.articles : [];
 				await updateArticleQueue((queue) => enqueueArticles(queue, incoming));
@@ -1006,26 +711,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 				await scheduleNext();
 				return { ok: true };
 			case "bp-capture-scroll": {
-				captureScrollActive = Boolean(message.active);
-				if (!captureScrollActive) {
+				const active = Boolean(message.active);
+				await idbSet(CAPTURE_SCROLL_KEY, active);
+				if (!active) {
 					await scheduleNext();
 				}
 				return { ok: true };
 			}
-			case "bp-timeline-cancel":
-				timelineCancelled = true;
-				await idbDelete(TIMELINE_JOB_KEY);
-				await chrome.alarms.clear(TIMELINE_ALARM);
-				return { ok: true };
 			case "bp-article-rate-limited": {
 				const delay = parseRetryAfterMs(
 					message.retryAfter != null ? String(message.retryAfter) : null,
 					ARTICLE_RATE_LIMIT_MS,
 				);
 				await noteRateLimited(delay);
+				const limited = await loadHydrationState();
 				const opened = await loadOpenedTabs();
 				if (opened.length > 0) {
-					await failTab(opened[0]!.tabId, "X rate limited (429)");
+					const current = opened[0]!;
+					await closeHydrationTab(current.tabId);
+					await updateArticleQueue((items) =>
+						markArticleRateLimited(
+							items,
+							current.articleId,
+							"X rate limited article request (429)",
+							Date.now(),
+							limited.rateLimitHits ?? 1,
+						),
+					);
+					await releaseArticleLease(current.articleId);
+					await broadcastStats();
 				}
 				await scheduleNext(delay);
 				return { ok: true };
@@ -1034,27 +748,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 				return { stats: articleQueueStats(await loadArticleQueue()) };
 			default:
 				return null;
-		}
-	})()
-		.then((result) => sendResponse({ ok: true, result }))
-		.catch((err) =>
+	}
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+	void (async () => {
+		try {
+			const result = await handleWorkerMessage(message, sender);
+			sendResponse({ ok: true, result });
+		} catch (err) {
 			sendResponse({
 				ok: false,
 				error: err instanceof Error ? err.message : String(err),
-			}),
-		);
+			});
+		}
+	})();
 	return true;
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-	if (alarm.name === SYNC_RETRY_ALARM) {
-		void retryPendingUpload();
-		return;
-	}
 	if (alarm.name === IMPORT_QUEUE_ALARM) {
-		void drainImportQueue().then((state) => {
+		void (async () => {
+			const state = await processNextImport();
 			scheduleSyncStatusPush(state.lastError);
-		});
+		})();
 		return;
 	}
 	if (alarm.name.startsWith(ARTICLE_TIMEOUT_PREFIX)) {
@@ -1064,16 +781,20 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 		}
 		return;
 	}
-	if (alarm.name === TIMELINE_ALARM) {
-		void runTimelinePages();
-		return;
-	}
 	if (alarm.name === ALARM_NAME) {
 		queueHydration();
 		return;
 	}
 	if (alarm.name === SYNC_STATUS_ALARM) {
 		void syncWithServer();
+		return;
+	}
+	if (alarm.name === SYNC_STATUS_PUSH_ALARM) {
+		void (async () => {
+			const error = await idbGet<string>(SYNC_STATUS_ERROR_KEY);
+			await idbDelete(SYNC_STATUS_ERROR_KEY);
+			await syncWithServer(error ?? undefined);
+		})();
 	}
 });
 
@@ -1088,11 +809,11 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.runtime.onStartup.addListener(() => {
 	void chrome.alarms.create(SYNC_STATUS_ALARM, { periodInMinutes: 1 });
-	void drainImportQueue();
-	void runTimelinePages();
+	void migrateLegacyPendingUpload();
+	void processNextImport();
 	void bootstrapArticles();
 });
 
+void migrateLegacyPendingUpload();
 void bootstrapArticles();
-void drainImportQueue();
-void runTimelinePages();
+void processNextImport();

@@ -4,7 +4,6 @@ import type {
 	ExportPayload,
 } from "@repo/import/capture/engine";
 import type { ImportWorkerProgress } from "@repo/import";
-import type { CaptureEventDetail } from "@repo/import/capture/hooks-events";
 
 interface WorkerResponse<T> {
 	ok: boolean;
@@ -42,17 +41,6 @@ export function createBackgroundStorageAdapter(): CaptureStorage {
 	};
 }
 
-export function syncInBackground(
-	payload: ExportPayload,
-	serverUrl: string,
-): Promise<{ imported: number; skipped: number; total: number | null }> {
-	return request({
-		type: "bp-sync",
-		payload,
-		serverUrl,
-	});
-}
-
 export function enqueueImportsInBackground(
 	payload: ExportPayload,
 	serverUrl: string,
@@ -74,25 +62,3 @@ export async function fetchTotalInBackground(
 	return result.total;
 }
 
-export interface TimelineProgress {
-	captured: number;
-	imported: number;
-	skipped: number;
-	pages: number;
-	running: boolean;
-	error?: string;
-	libraryTotal?: number | null;
-}
-
-export function seedTimelineInBackground(
-	detail: CaptureEventDetail,
-	source: CaptureState["source"],
-	pageUrl: string,
-): Promise<{ accepted: boolean }> {
-	return request({
-		type: "bp-timeline-seed",
-		detail,
-		source,
-		pageUrl,
-	});
-}

@@ -9,6 +9,7 @@ import {
 	hasArticleBody,
 	hasFullArticleBody,
 	isRicherArticlePayload,
+	isRicherTweetPayload,
 	mergeArticleIntoTweet,
 	parseExportV2,
 	compareSortIndex,
@@ -131,6 +132,20 @@ export async function importExportJson(
 			return false;
 		}
 	});
+	const richerTweetUpdates = parsed.items.filter((t) => {
+		const existing = existingByExternalId.get(t.id);
+		if (!existing || !t.authorId) return false;
+		// Article body upgrades are handled separately (merge, not replace).
+		if (articleUpdates.some((a) => a.id === t.id)) return false;
+		try {
+			return isRicherTweetPayload(
+				JSON.parse(t.rawJson),
+				JSON.parse(existing.rawJson),
+			);
+		} catch {
+			return false;
+		}
+	});
 
 	if (newItems.length > 0) {
 		const CHUNK = 200;
@@ -181,6 +196,24 @@ export async function importExportJson(
 			.where(
 				and(eq(items.source, source), eq(items.externalId, item.id)),
 			);
+	}
+
+	for (const item of richerTweetUpdates) {
+		await db
+			.update(items)
+			.set({
+				rawJson: item.rawJson,
+				text: item.text,
+				publishedAt: item.createdAt,
+				kind: item.kind,
+				contentType: item.contentType,
+				url: item.url,
+				sortIndex: item.sortIndex ?? existingByExternalId.get(item.id)?.sortIndex,
+				authorId: item.authorId,
+				entities: null,
+				importedAt: now,
+			})
+			.where(and(eq(items.source, source), eq(items.externalId, item.id)));
 	}
 
 	for (const item of articleUpdates) {
@@ -263,14 +296,20 @@ export async function importExportJson(
 		(u) => !existingUserIds.has(u.id),
 	).length;
 	const usersSkipped = parsed.users.length - usersImported;
-	const articleUpdatedIds = new Set(articleUpdates.map((item) => item.id));
-	const kindOnly = kindUpdates.filter((item) => !articleUpdatedIds.has(item.id));
-	const itemsImported = newItems.length + kindOnly.length + articleUpdates.length;
+	// "imported" means brand-new library rows only. Existing items may still be
+	// patched (kind / richer payload / article body) but must not show as "new".
+	const itemsImported = newItems.length;
 	const itemsSkipped = parsed.items.length - itemsImported;
 
+	const articleUpdatedIds = new Set(articleUpdates.map((item) => item.id));
+	const richerUpdatedIds = new Set(richerTweetUpdates.map((item) => item.id));
+	const kindOnly = kindUpdates.filter(
+		(item) => !articleUpdatedIds.has(item.id) && !richerUpdatedIds.has(item.id),
+	);
 	const processExternalIds = [
 		...newItems.map((item) => item.id),
 		...kindOnly.map((item) => item.id),
+		...richerTweetUpdates.map((item) => item.id),
 	];
 	const affectedItemIds =
 		processExternalIds.length > 0
@@ -296,11 +335,7 @@ export async function importExportJson(
 		itemsSkipped,
 	});
 
-	const importedExternalIds = new Set([
-		...newItems.map((item) => item.id),
-		...kindOnly.map((item) => item.id),
-		...articleUpdates.map((item) => item.id),
-	]);
+	const importedExternalIds = new Set(newItems.map((item) => item.id));
 	const queueOutcomes = parsed.items.map((item) => ({
 		externalId: item.id,
 		status: importedExternalIds.has(item.id) ? "imported" as const : "skipped" as const,

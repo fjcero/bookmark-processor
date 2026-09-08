@@ -6,8 +6,6 @@ export interface SidebarUiRefs {
 	totalEl: HTMLElement;
 	syncEl: HTMLElement;
 	articleEl: HTMLElement;
-	workerSummaryEl: HTMLElement;
-	workerLogEl: HTMLOListElement;
 	retryBtn: HTMLButtonElement;
 	autoBtn: HTMLButtonElement;
 }
@@ -185,30 +183,12 @@ export function buildSidebarPanel(opts: {
 	articleEl.className = "bp-sidebar-card__hint";
 	articleEl.textContent = "Articles idle";
 
-	const workerSummaryEl = document.createElement("span");
-	workerSummaryEl.className = "bp-worker__summary-text";
-	workerSummaryEl.textContent = "Worker idle";
-
-	const workerDot = document.createElement("span");
-	workerDot.className = "bp-worker__dot";
-	workerDot.setAttribute("aria-hidden", "true");
-
-	const workerSummary = document.createElement("summary");
-	workerSummary.append(workerDot, workerSummaryEl);
-
-	const workerLogEl = document.createElement("ol");
-	workerLogEl.className = "bp-worker__log";
-
-	const worker = document.createElement("details");
-	worker.className = "bp-worker";
-	worker.append(workerSummary, workerLogEl);
-
 	const hint = document.createElement("p");
 	hint.className = "bp-sidebar-card__hint";
 	hint.textContent = `${opts.label} sync automatically while you scroll.`;
 
 	actions.append(autoBtn, retryBtn);
-	body.append(metrics, actions, articleEl, worker, hint);
+	body.append(metrics, actions, articleEl, hint);
 	root.append(header, body);
 
 	return {
@@ -217,8 +197,6 @@ export function buildSidebarPanel(opts: {
 		totalEl,
 		syncEl,
 		articleEl,
-		workerSummaryEl,
-		workerLogEl,
 		retryBtn,
 		autoBtn,
 	};
@@ -257,34 +235,8 @@ export function setArticleStatus(
 	const remaining = stats.pending + stats.fetching;
 	refs.articleEl.textContent =
 		libraryMissing != null
-			? `${remaining.toLocaleString()} active · ${libraryMissing.toLocaleString()} missing in library`
-			: `${remaining.toLocaleString()} articles active`;
-}
-
-export function trackWorkerActivity(
-	refs: SidebarUiRefs,
-	message: string,
-	tone: "active" | "success" | "error" | "idle" = "active",
-): void {
-	refs.workerSummaryEl.textContent = message;
-	const worker = refs.workerSummaryEl.closest(".bp-worker");
-	if (worker) worker.setAttribute("data-tone", tone);
-
-	const item = document.createElement("li");
-	const time = document.createElement("time");
-	time.dateTime = new Date().toISOString();
-	time.textContent = new Date().toLocaleTimeString([], {
-		hour: "2-digit",
-		minute: "2-digit",
-		second: "2-digit",
-	});
-	const text = document.createElement("span");
-	text.textContent = message;
-	item.append(time, text);
-	refs.workerLogEl.prepend(item);
-	while (refs.workerLogEl.children.length > 8) {
-		refs.workerLogEl.lastElementChild?.remove();
-	}
+			? `${remaining.toLocaleString()} in queue · ${libraryMissing.toLocaleString()} missing in library`
+			: `${remaining.toLocaleString()} in queue`;
 }
 
 export function setSyncRetryVisible(refs: SidebarUiRefs, visible: boolean): void {

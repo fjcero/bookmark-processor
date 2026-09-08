@@ -11,7 +11,7 @@ export interface ArticleQueueItem {
 }
 
 /** Minimum quiet time between finishing one article and starting the next. */
-export const ARTICLE_GAP_MS = 20_000
+export const ARTICLE_GAP_MS = 30_000
 /** How often to poll the server when the local queue is empty. */
 export const ARTICLE_POLL_IDLE_MS = 300_000
 /** Default global pause after X returns 429. */
@@ -42,6 +42,8 @@ export interface ArticleHydrationState {
   rateLimitedUntil?: number
   rateLimitHits?: number
   lastCompletedAt?: number
+  processingArticleId?: string
+  leaseUntil?: number
 }
 
 export type ArticleQueueIncoming = Pick<
@@ -269,7 +271,9 @@ export function nextQueueWakeAt(
   state: ArticleHydrationState,
   now = Date.now(),
 ): number | null {
-  const waits = [msUntilHydrationAllowed(state, now)]
+  const waits: number[] = []
+  const globalWait = msUntilHydrationAllowed(state, now)
+  if (globalWait > 0) waits.push(globalWait)
   for (const item of queue) {
     if (item.status !== "pending" || item.nextAt == null) continue
     waits.push(Math.max(0, item.nextAt - now))

@@ -30,7 +30,7 @@ test("detects article stubs and flattens hydrated bodies", () => {
   ) as { tweets: Record<string, unknown> };
   const stub = data.tweets["1111111111111111111"];
   const hydrated = data.tweets["3333333333333333333"];
-  const post = data.tweets["2096448005696266546"];
+  const post = data.tweets["5555555555555555555"];
 
   assert.equal(contentTypeOfTweet(post), "post");
   assert.equal(contentTypeOfTweet(stub), "article");

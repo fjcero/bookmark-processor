@@ -1,14 +1,17 @@
 import {
 	enqueueArticles,
 	extendRateLimit,
+	markArticleFetching,
+	pickNextArticle,
 	type ArticleHydrationState,
 	type ArticleQueueItem,
 } from "@repo/import";
-import { idbDelete, idbGet, idbSet } from "./idb";
+import { idbDelete, idbGet, idbSet, idbUpdate } from "./idb";
 
 const HYDRATION_KEY = "bp-article-hydration";
 const LEGACY_QUEUE_KEY = "bp-article-queue";
 export const ALARM_NAME = "bp-article-hydrate";
+const ARTICLE_LEASE_MS = 120_000;
 
 const EMPTY_STATE: ArticleHydrationState = { queue: [] };
 
@@ -48,10 +51,10 @@ export async function loadArticleQueue(): Promise<ArticleQueueItem[]> {
 export async function updateHydrationState(
 	mutator: (state: ArticleHydrationState) => ArticleHydrationState,
 ): Promise<ArticleHydrationState> {
-	const current = await loadHydrationState();
-	const next = mutator(current);
-	await saveHydrationState(next);
-	return next;
+	const initial = await loadHydrationState();
+	return idbUpdate<ArticleHydrationState>(HYDRATION_KEY, (saved) =>
+		mutator(saved ?? initial),
+	);
 }
 
 export async function updateArticleQueue(
@@ -68,6 +71,8 @@ export async function noteArticleCompleted(): Promise<void> {
 	await updateHydrationState((state) => ({
 		...state,
 		lastCompletedAt: Date.now(),
+		rateLimitedUntil: undefined,
+		rateLimitHits: 0,
 	}));
 }
 
@@ -76,6 +81,55 @@ export async function noteRateLimited(delayMs: number): Promise<number> {
 		extendRateLimit(current, delayMs),
 	);
 	return state.rateLimitedUntil ?? Date.now() + delayMs;
+}
+
+/** Atomically claim one article for one worker event. */
+export async function claimNextArticle(
+	now = Date.now(),
+): Promise<ArticleQueueItem | null> {
+	await loadHydrationState();
+	let claimed: ArticleQueueItem | null = null;
+	await idbUpdate<ArticleHydrationState>(HYDRATION_KEY, (saved) => {
+		const state = saved ?? { queue: [] };
+		if ((state.leaseUntil ?? 0) > now) return state;
+
+		if (state.processingArticleId) {
+			const interrupted = state.queue.find(
+				(item) => item.articleId === state.processingArticleId,
+			);
+			if (interrupted?.status === "fetching") {
+				interrupted.status = "pending";
+				interrupted.nextAt = undefined;
+				interrupted.lastError = "Article worker lease expired";
+			}
+		}
+
+		const next = pickNextArticle(state.queue, now);
+		if (!next) {
+			return {
+				...state,
+				processingArticleId: undefined,
+				leaseUntil: undefined,
+			};
+		}
+		markArticleFetching(state.queue, next.articleId);
+		state.processingArticleId = next.articleId;
+		state.leaseUntil = now + ARTICLE_LEASE_MS;
+		claimed = { ...next };
+		return state;
+	});
+	return claimed;
+}
+
+export async function releaseArticleLease(articleId: string): Promise<void> {
+	await updateHydrationState((state) => {
+		if (state.processingArticleId !== articleId) return state;
+		return {
+			...state,
+			processingArticleId: undefined,
+			leaseUntil: undefined,
+		};
+	});
 }
 
 export { enqueueArticles };

@@ -10,9 +10,9 @@
       "core": { "name": "Xoan", "screen_name": "xo4n" },
       "avatar": { "image_url": "https://pbs.twimg.com/profile_images/test.jpg" }
     },
-    "2096448005696266546": {
+    "5555555555555555555": {
       "__typename": "Tweet",
-      "rest_id": "2096448005696266546",
+      "rest_id": "5555555555555555555",
       "core": {
         "user_results": {
           "result": {

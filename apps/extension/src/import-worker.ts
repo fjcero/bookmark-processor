@@ -10,6 +10,7 @@ import {
 	idbGetAllFromStore,
 	idbPutToStore,
 	idbSet,
+	idbUpdate,
 	IMPORT_QUEUE_STORE,
 } from "./idb";
 
@@ -18,6 +19,9 @@ const LEGACY_IMPORT_QUEUE_KEY = "bp-import-worker";
 const IMPORT_META_KEY = "bp-import-worker-meta";
 export const IMPORT_QUEUE_ALARM = "bp-import-worker-next";
 const RETRY_MS = 60_000;
+const IMPORT_LEASE_MS = 120_000;
+/** Chrome MV3 alarms cannot reliably fire sooner than ~30s. */
+const ALARM_MIN_MS = 30_000;
 
 export interface ImportWorkerEntry {
 	externalId: string;
@@ -32,6 +36,7 @@ export interface ImportWorkerEntry {
 export interface ImportWorkerState {
 	queue: ImportWorkerEntry[];
 	processingId?: string;
+	leaseUntil?: number;
 	imported: number;
 	skipped: number;
 	lastError?: string;
@@ -39,6 +44,7 @@ export interface ImportWorkerState {
 
 interface ImportWorkerMeta {
 	processingId?: string;
+	leaseUntil?: number;
 	imported: number;
 	skipped: number;
 	lastError?: string;
@@ -69,15 +75,6 @@ const EMPTY_META: ImportWorkerMeta = {
 	skipped: 0,
 };
 
-let draining: Promise<ImportWorkerState> | null = null;
-let progressListener: ((progress: ImportWorkerProgress) => void) | null = null;
-
-export function setImportWorkerProgressListener(
-	listener: (progress: ImportWorkerProgress) => void,
-): void {
-	progressListener = listener;
-}
-
 export async function loadImportWorkerState(): Promise<ImportWorkerState> {
 	const legacy = await idbGet<ImportWorkerState>(LEGACY_IMPORT_QUEUE_KEY);
 	if (legacy) {
@@ -86,6 +83,7 @@ export async function loadImportWorkerState(): Promise<ImportWorkerState> {
 		}
 		await idbSet(IMPORT_META_KEY, {
 			processingId: legacy.processingId,
+			leaseUntil: undefined,
 			imported: legacy.imported ?? 0,
 			skipped: legacy.skipped ?? 0,
 			lastError: legacy.lastError,
@@ -100,15 +98,6 @@ export async function loadImportWorkerState(): Promise<ImportWorkerState> {
 	queue.sort((a, b) => a.enqueuedAt - b.enqueuedAt);
 	const meta = savedMeta ?? EMPTY_META;
 	return { queue, ...meta };
-}
-
-async function saveImportWorkerState(state: ImportWorkerState): Promise<void> {
-	await idbSet(IMPORT_META_KEY, {
-		processingId: state.processingId,
-		imported: state.imported,
-		skipped: state.skipped,
-		lastError: state.lastError,
-	} satisfies ImportWorkerMeta);
 }
 
 function singleTweetPayload(
@@ -145,7 +134,6 @@ export async function enqueueImportPayload(
 		state.queue.push(entry);
 		queued.add(externalId);
 	}
-	await saveImportWorkerState(state);
 	if (state.queue.length > 0) {
 		// Durable wake-up in case Chrome suspends the service worker mid-drain.
 		await scheduleNext(Date.now() + RETRY_MS);
@@ -161,7 +149,6 @@ async function removeFromCapture(externalId: string): Promise<void> {
 }
 
 async function broadcast(progress: ImportWorkerProgress): Promise<void> {
-	progressListener?.(progress);
 	const tabs = await chrome.tabs.query({
 		url: ["https://x.com/*", "https://twitter.com/*"],
 	});
@@ -203,77 +190,115 @@ function progressOf(
 
 async function scheduleNext(when: number): Promise<void> {
 	await chrome.alarms.create(IMPORT_QUEUE_ALARM, {
-		when: Math.max(Date.now() + 1000, when),
+		when: Math.max(Date.now() + ALARM_MIN_MS, when),
 	});
 }
 
-async function drain(): Promise<ImportWorkerState> {
+/** Keep draining while the service worker is awake — no localhost throttle. */
+function continueImportSoon(): void {
+	setTimeout(() => {
+		void processNextImport();
+	}, 0);
+}
+
+async function acquireImportLease(externalId: string): Promise<boolean> {
+	let acquired = false;
+	const now = Date.now();
+	await idbUpdate<ImportWorkerMeta>(IMPORT_META_KEY, (saved) => {
+		const current = saved ?? EMPTY_META;
+		if ((current.leaseUntil ?? 0) > now) return current;
+		acquired = true;
+		return {
+			...current,
+			processingId: externalId,
+			leaseUntil: now + IMPORT_LEASE_MS,
+			lastError: undefined,
+		};
+	});
+	return acquired;
+}
+
+async function releaseImportLease(input?: {
+	imported?: number;
+	skipped?: number;
+	lastError?: string;
+}): Promise<void> {
+	await idbUpdate<ImportWorkerMeta>(IMPORT_META_KEY, (saved) => {
+		const current = saved ?? EMPTY_META;
+		return {
+			...current,
+			processingId: undefined,
+			leaseUntil: undefined,
+			imported: current.imported + (input?.imported ?? 0),
+			skipped: current.skipped + (input?.skipped ?? 0),
+			lastError: input?.lastError,
+		};
+	});
+}
+
+/** Process at most one persisted tweet. Each call is one MV3 worker event. */
+export async function processNextImport(): Promise<ImportWorkerState> {
 	let state = await loadImportWorkerState();
-	while (state.queue.length > 0) {
-		const entry = state.queue[0]!;
-		if (entry.nextAt && entry.nextAt > Date.now()) {
-			await scheduleNext(entry.nextAt);
-			break;
-		}
-
-		state.processingId = entry.externalId;
-		state.lastError = undefined;
-		await saveImportWorkerState(state);
-		await broadcast(progressOf(state));
-
-		try {
-			const result = await uploadPayload(entry.payload, entry.serverUrl);
-			const accounted = result.imported + result.skipped;
-			if (accounted !== 1) {
-				throw new Error("Server did not account for the queued tweet");
-			}
-
-			state.queue.shift();
-			await idbDeleteFromStore(IMPORT_QUEUE_STORE, entry.externalId);
-			state.processingId = undefined;
-			state.imported += result.imported;
-			state.skipped += result.skipped;
-			state.lastError = undefined;
-			await saveImportWorkerState(state);
-			await removeFromCapture(entry.externalId);
-			await broadcast(
-				progressOf(state, {
-					completedIds: [entry.externalId],
-					importedDelta: result.imported,
-					skippedDelta: result.skipped,
-					libraryTotal: result.total,
-				}),
-			);
-		} catch (error) {
-			const message =
-				error instanceof Error ? error.message : "Import worker failed";
-			entry.attempts += 1;
-			entry.lastError = message;
-			entry.nextAt = Date.now() + RETRY_MS;
-			await idbPutToStore(IMPORT_QUEUE_STORE, entry);
-			state.processingId = undefined;
-			state.lastError = message;
-			await saveImportWorkerState(state);
-			await broadcast(progressOf(state));
-			await scheduleNext(entry.nextAt);
-			break;
-		}
-	}
-
-	if (state.queue.length === 0) {
-		state.processingId = undefined;
-		await saveImportWorkerState(state);
+	const entry = state.queue[0];
+	if (!entry) {
 		await chrome.alarms.clear(IMPORT_QUEUE_ALARM);
+		return state;
 	}
-	return state;
-}
+	if (entry.nextAt && entry.nextAt > Date.now()) {
+		await scheduleNext(entry.nextAt);
+		return state;
+	}
+	if (!(await acquireImportLease(entry.externalId))) {
+		state = await loadImportWorkerState();
+		await scheduleNext(state.leaseUntil ?? Date.now() + RETRY_MS);
+		return state;
+	}
 
-export function drainImportQueue(): Promise<ImportWorkerState> {
-	if (draining) return draining;
-	draining = drain().finally(() => {
-		draining = null;
-	});
-	return draining;
+	state = await loadImportWorkerState();
+	await broadcast(progressOf(state));
+
+	try {
+		const result = await uploadPayload(entry.payload, entry.serverUrl);
+		const accounted = result.imported + result.skipped;
+		if (accounted !== 1) {
+			throw new Error("Server did not account for the queued tweet");
+		}
+		await idbDeleteFromStore(IMPORT_QUEUE_STORE, entry.externalId);
+		await releaseImportLease({
+			imported: result.imported,
+			skipped: result.skipped,
+		});
+		await removeFromCapture(entry.externalId);
+		state = await loadImportWorkerState();
+		await broadcast(
+			progressOf(state, {
+				completedIds: [entry.externalId],
+				importedDelta: result.imported,
+				skippedDelta: result.skipped,
+				libraryTotal: result.total,
+			}),
+		);
+		if (state.queue.length > 0) {
+			// Durable wake-up only — X rate limits live in article hydration, not here.
+			await scheduleNext(Date.now() + RETRY_MS);
+			continueImportSoon();
+		} else {
+			await chrome.alarms.clear(IMPORT_QUEUE_ALARM);
+		}
+		return state;
+	} catch (error) {
+		const message =
+			error instanceof Error ? error.message : "Import worker failed";
+		entry.attempts += 1;
+		entry.lastError = message;
+		entry.nextAt = Date.now() + RETRY_MS;
+		await idbPutToStore(IMPORT_QUEUE_STORE, entry);
+		await releaseImportLease({ lastError: message });
+		state = await loadImportWorkerState();
+		await broadcast(progressOf(state));
+		await scheduleNext(entry.nextAt);
+		return state;
+	}
 }
 
 export function importWorkerProgress(

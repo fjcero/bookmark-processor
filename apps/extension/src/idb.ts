@@ -57,6 +57,31 @@ export async function idbDelete(key: string): Promise<void> {
 	});
 }
 
+/** Atomically read and replace one value in the state store. */
+export async function idbUpdate<T>(
+	key: string,
+	update: (current: T | null) => T,
+): Promise<T> {
+	const db = await openDb();
+	return new Promise((resolve, reject) => {
+		const tx = db.transaction(STORE, "readwrite");
+		const store = tx.objectStore(STORE);
+		const get = store.get(key);
+		let next: T;
+		get.onsuccess = () => {
+			next = update((get.result as T | undefined) ?? null);
+			store.put(next, key);
+		};
+		get.onerror = () => reject(get.error);
+		tx.oncomplete = () => {
+			db.close();
+			resolve(next!);
+		};
+		tx.onerror = () => reject(tx.error);
+		tx.onabort = () => reject(tx.error);
+	});
+}
+
 export async function idbGetAllFromStore<T>(
 	storeName: string,
 ): Promise<T[]> {
