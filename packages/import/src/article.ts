@@ -155,6 +155,19 @@ export function hasArticleBody(result: unknown): boolean {
   return Boolean(article?.extracted_html && article.extracted_html.length > 200)
 }
 
+export const ARTICLE_RAW_KEY = "_articleRaw"
+
+export function articleRawFrom(value: unknown): unknown | undefined {
+  const raw = asRecord(value)?.[ARTICLE_RAW_KEY]
+  return raw === undefined ? undefined : raw
+}
+
+export function stampArticleRaw(tweet: unknown, raw: unknown): Record<string, unknown> {
+  const base = asRecord(tweet) ? { ...(tweet as Record<string, unknown>) } : {}
+  if (raw != null) base[ARTICLE_RAW_KEY] = raw
+  return base
+}
+
 /** True only when the body is substantially longer than the bookmark preview. */
 export function hasFullArticleBody(result: unknown): boolean {
   const article = articleResultFromUnknown(result) ?? articleResultFromTweet(result)
@@ -308,6 +321,7 @@ export function findHydratedArticleResult(value: unknown): GraphQLArticleResult 
 }
 
 export function isRicherArticlePayload(incoming: unknown, existing: unknown): boolean {
+  if (articleRawFrom(incoming) != null && articleRawFrom(existing) == null) return true
   const incomingArticle =
     articleResultFromTweet(incoming) ?? findHydratedArticleResult(incoming)
   if (!incomingArticle || !hasArticleBody(incomingArticle)) return false
@@ -368,7 +382,22 @@ export function mergeArticleIntoTweet(
       result: mergeArticleResults(existingResult, article),
     },
   }
+  const incomingRaw = articleRawFrom(tweet) ?? articleRawFrom(article)
+  if (incomingRaw != null && articleRawFrom(base) == null) {
+    base[ARTICLE_RAW_KEY] = incomingRaw
+  }
   return base
+}
+
+export function hasCompleteArticleRaw(value: unknown): boolean {
+  const article =
+    findHydratedArticleResult(value) ?? articleResultFromTweet(value)
+  if (hasFullArticleBody(article)) return true
+  const stamped = articleRawFrom(value)
+  if (stamped == null) return false
+  return hasFullArticleBody(
+    findHydratedArticleResult(stamped) ?? articleResultFromUnknown(stamped),
+  )
 }
 
 export function isPendingArticleRaw(rawJson: string, contentType?: string): boolean {
@@ -376,9 +405,7 @@ export function isPendingArticleRaw(rawJson: string, contentType?: string): bool
   try {
     const parsed = JSON.parse(rawJson) as unknown
     if (!isArticleWrapper(parsed) && contentType !== "article") return false
-    return !hasFullArticleBody(
-      articleResultFromTweet(parsed) ?? findHydratedArticleResult(parsed),
-    )
+    return !hasCompleteArticleRaw(parsed)
   } catch {
     return contentType === "article"
   }
@@ -402,7 +429,7 @@ export function pendingArticleFromRaw(
     const article = articleResultFromTweet(parsed)
     const articleId = articleRestId(article)
     if (!articleId) return null
-    if (!opts?.refetch && hasFullArticleBody(article)) return null
+    if (hasCompleteArticleRaw(parsed)) return null
     return {
       tweetId,
       articleId,

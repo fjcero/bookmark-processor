@@ -2,9 +2,55 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   enableArticleBodyFieldToggles,
+  graphqlOperationName,
+  isArticleApiUrl,
+  isGraphqlWriteOperation,
+  isSafeArticleReplayUrl,
   requestMentionsArticle,
   withArticleBodyToggles,
 } from "./article-request.ts";
+
+test("only treats article-entity reads as article API URLs", () => {
+  assert.equal(
+    isArticleApiUrl("https://x.com/i/api/graphql/abc/ArticleEntityResultByRestId"),
+    true,
+  );
+  assert.equal(
+    isArticleApiUrl("https://x.com/i/api/graphql/abc/ArticleByRestId"),
+    true,
+  );
+  assert.equal(
+    isArticleApiUrl("https://x.com/i/api/graphql/abc/TweetResultByRestId"),
+    false,
+  );
+  assert.equal(
+    isArticleApiUrl("https://x.com/i/api/graphql/abc/Bookmarks"),
+    false,
+  );
+});
+
+test("never flags bookmark deletes as a safe article replay", () => {
+  const del = "https://x.com/i/api/graphql/xyz/DeleteBookmark";
+  const create = "https://x.com/i/api/graphql/xyz/CreateBookmark";
+  const unbookmark = "https://x.com/i/api/graphql/xyz/UnbookmarkTweet";
+  assert.equal(graphqlOperationName(del), "DeleteBookmark");
+  assert.equal(isGraphqlWriteOperation(del), true);
+  assert.equal(isGraphqlWriteOperation(create), true);
+  assert.equal(isGraphqlWriteOperation(unbookmark), true);
+  assert.equal(isArticleApiUrl(del), false);
+  assert.equal(isSafeArticleReplayUrl(del), false);
+  assert.equal(isSafeArticleReplayUrl(create), false);
+  assert.equal(
+    isGraphqlWriteOperation("https://x.com/i/api/graphql/abc/Bookmarks"),
+    false,
+  );
+  assert.equal(
+    isSafeArticleReplayUrl(
+      "https://x.com/i/api/graphql/abc/ArticleEntityResultByRestId",
+    ),
+    true,
+  );
+});
 
 test("forces withArticlePlainText on GraphQL fieldToggles", () => {
   const url = new URL("https://x.com/i/api/graphql/abc/TweetResultByRestId");

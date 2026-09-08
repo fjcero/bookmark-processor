@@ -104,10 +104,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
 	const stages = selectedStages(prefs);
 	let processing = false;
-	if (stages.length > 0 && result.items.imported > 0) {
+	if (stages.length > 0 && result.affectedItemIds.length > 0) {
 		if (getProcessState().status !== "running") {
 			processing = true;
-			void startProcess({ stages });
+			void startProcess({ stages, itemIds: result.affectedItemIds });
 		}
 	}
 	const stats = await getStats();

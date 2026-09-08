@@ -1,7 +1,7 @@
 import {
 	articleRestId,
 	findHydratedArticleResult,
-	isArticleApiUrl,
+	isSafeArticleReplayUrl,
 	requestMentionsArticle,
 	withArticleBodyToggles,
 } from "@repo/import";
@@ -19,7 +19,7 @@ export function createArticleRequestTemplate(
 	detail: CaptureEventDetail,
 	pageArticleId: string,
 ): ArticleRequestTemplate | null {
-	if (!detail.request || !isArticleApiUrl(detail.url)) return null;
+	if (!detail.request || !isSafeArticleReplayUrl(detail.url)) return null;
 	if (!requestMentionsArticle(detail.url, detail.request.body, pageArticleId)) {
 		return null;
 	}
@@ -67,6 +67,9 @@ export function requestForArticle(
 	template: ArticleRequestTemplate,
 	articleId: string,
 ): { url: string; body?: string } {
+	if (!isSafeArticleReplayUrl(template.url)) {
+		throw new Error("Refusing to replay a non-article GraphQL request");
+	}
 	const url = new URL(template.url);
 	let replaced = false;
 

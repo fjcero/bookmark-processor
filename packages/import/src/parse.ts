@@ -1,11 +1,16 @@
 import {
   articlePlainText,
+  articleRawFrom,
   articleRestId,
   articleResultFromTweet,
   articleUrl,
   contentTypeOfTweet,
-} from './article'
-import { collectSortIndexes, compareSortIndex, sortIndexFromTweet } from './sort-index'
+  findHydratedArticleResult,
+  hasArticleBody,
+  mergeArticleIntoTweet,
+  stampArticleRaw,
+} from './article.ts'
+import { collectSortIndexes, compareSortIndex, sortIndexFromTweet } from './sort-index.ts'
 import type {
   ExportSource,
   ExportV2,
@@ -14,8 +19,8 @@ import type {
   NormalizedItem,
   NormalizedUser,
   ParsedExport,
-} from './types'
-import { X_SOURCE } from './types'
+} from './types.ts'
+import { X_SOURCE } from './types.ts'
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -47,11 +52,10 @@ function isTweetObject(value: unknown): value is GraphQLTweet {
     return true
   }
   const restId = obj.rest_id
-  return (
-    typeof restId === 'string' &&
-    restId.length > 5 &&
-    (obj.legacy != null || obj.core != null)
-  )
+  if (typeof restId !== 'string' || restId.length <= 5) return false
+  if (obj.legacy != null || obj.core != null) return true
+  // Extension hydration uploads { rest_id, article } without core/legacy.
+  return obj.article != null
 }
 
 function isUserObject(value: unknown): value is GraphQLUser {
@@ -95,12 +99,12 @@ function normalizeItem(
   if (!id) return null
 
   const embeddedUser = unwrapped.core?.user_results?.result
-  const authorId = embeddedUser?.rest_id ?? unwrapped.legacy?.user_id_str
-  if (!authorId) return null
+  const authorId = embeddedUser?.rest_id ?? unwrapped.legacy?.user_id_str ?? ''
   const handle = embeddedUser?.core?.screen_name ?? embeddedUser?.legacy?.screen_name
   const article = articleResultFromTweet(unwrapped)
   const articleId = articleRestId(article)
   const contentType = contentTypeOfTweet(unwrapped)
+  if (!authorId && contentType !== 'article') return null
 
   return {
     id,
@@ -146,6 +150,39 @@ function parseKind(value: unknown): ExportSource {
   return 'bookmark'
 }
 
+function applyArticleBodiesFromResponses(
+  tweets: Record<string, unknown>,
+  responses: unknown[],
+): void {
+  const keys = Object.keys(tweets)
+  if (keys.length === 0) return
+
+  for (const response of responses) {
+    const record = asRecord(response)
+    const data = record?.data ?? response
+    const article = findHydratedArticleResult(data)
+    if (!article || !hasArticleBody(article)) continue
+    const articleId = articleRestId(article)
+    let targets = keys.filter((key) => {
+      const id = articleRestId(articleResultFromTweet(tweets[key]))
+      return id != null && id === articleId
+    })
+    if (targets.length === 0 && keys.length === 1) targets = keys
+    for (const key of targets) {
+      tweets[key] = stampArticleRaw(mergeArticleIntoTweet(tweets[key], article), data)
+    }
+  }
+
+  for (const key of keys) {
+    const tweet = tweets[key]
+    const raw = articleRawFrom(tweet)
+    if (raw == null) continue
+    const article = findHydratedArticleResult(raw) ?? findHydratedArticleResult(tweet)
+    if (!article || !hasArticleBody(article)) continue
+    tweets[key] = stampArticleRaw(mergeArticleIntoTweet(tweet, article), raw)
+  }
+}
+
 export function parseExportV2(json: string | object): ParsedExport {
   let data: unknown
   if (typeof json === 'string') {
@@ -163,8 +200,13 @@ export function parseExportV2(json: string | object): ParsedExport {
   if (root.exportVersion !== 2) {
     throw new Error('Expected exportVersion 2')
   }
-  const tweetsMap = asRecord(root.tweets)
-  if (!tweetsMap) throw new Error('Export is missing tweets map')
+  const tweetsRecord = asRecord(root.tweets)
+  if (!tweetsRecord) throw new Error('Export is missing tweets map')
+  const tweetsMap = { ...tweetsRecord }
+  applyArticleBodiesFromResponses(
+    tweetsMap,
+    Array.isArray(root.responses) ? root.responses : [],
+  )
 
   const kind = parseKind(root.source)
   const usersById = new Map<string, NormalizedUser>()

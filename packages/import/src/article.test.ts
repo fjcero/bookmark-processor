@@ -18,6 +18,7 @@ import {
   isRicherArticlePayload,
   mergeArticleIntoTweet,
   pendingArticleFromRaw,
+  hasCompleteArticleRaw,
   hasFullArticleBody,
 } from "./article.ts";
 
@@ -246,12 +247,7 @@ test("pending selection keeps preview-only articles until the body is full", () 
     url: "https://x.com/i/article/222",
   });
   assert.equal(pendingArticleFromRaw("111", fullRaw, null), null);
-  assert.deepEqual(pendingArticleFromRaw("111", fullRaw, null, { refetch: true }), {
-    tweetId: "111",
-    articleId: "222",
-    url: "https://x.com/i/article/222",
-    refetch: true,
-  });
+  assert.equal(pendingArticleFromRaw("111", fullRaw, null, { refetch: true }), null);
   assert.equal(
     hasFullArticleBody({
       rest_id: "222",
@@ -282,6 +278,32 @@ test("pending selection keeps preview-only articles until the body is full", () 
     }),
     true,
   );
+});
+
+test("reads a stored GraphQL envelope even when the nested article is still a preview", () => {
+  const preview = "Short preview of the article.";
+  const rawJson = JSON.stringify({
+    rest_id: "111",
+    article: {
+      article_results: {
+        result: { rest_id: "222", title: "Title", preview_text: preview },
+      },
+    },
+    _articleRaw: {
+      data: {
+        article_result_by_rest_id: {
+          result: {
+            rest_id: "222",
+            title: "Title",
+            preview_text: preview,
+            plain_text: `${preview} Then the real piece continues with architecture tradeoffs, the queue we rebuilt, and why the first database choice stopped working once volume scaled a thousand times over a few months.`,
+          },
+        },
+      },
+    },
+  });
+  assert.equal(isPendingArticleRaw(rawJson, "article"), false);
+  assert.equal(hasCompleteArticleRaw(JSON.parse(rawJson)), true);
 });
 
 test("finds hydrated article results nested in GraphQL data", () => {

@@ -1,11 +1,49 @@
+const ARTICLE_READ_OPS = new Set([
+  "articleentityresultbyrestid",
+  "articlebyrestid",
+  "articleresultbyrestid",
+])
+
+const WRITE_OP_RE =
+  /^(Create|Delete|Destroy|Update|Unbookmark|BookmarkTweet|RemoveBookmark|Favorite|Unfavorite|Follow|Unfollow|Mute|Unmute|Block|Unblock|Retweet|Pin|Hide)/i
+
+export function graphqlOperationName(url: string): string | null {
+  try {
+    const path = new URL(url, "https://x.com").pathname
+    const parts = path.split("/").filter(Boolean)
+    const idx = parts.indexOf("graphql")
+    if (idx < 0) return null
+    if (parts[idx + 2]) return parts[idx + 2]
+    const next = parts[idx + 1]
+    if (next && /[A-Za-z]/.test(next) && next.length < 80 && !/^[A-Za-z0-9_-]{20,}$/.test(next)) {
+      return next
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+/** Mutations we must never replay with the user's X session. */
+export function isGraphqlWriteOperation(url: string): boolean {
+  const op = graphqlOperationName(url)
+  if (!op) return false
+  if (/bookmark/i.test(op) && /(create|delete|remove|unbookmark|add)/i.test(op)) {
+    return true
+  }
+  return WRITE_OP_RE.test(op)
+}
+
+/** Read-only article body queries. Not every GraphQL URL on x.com. */
 export function isArticleApiUrl(url: string): boolean {
-  const value = url.toLowerCase()
-  return (
-    value.includes("/graphql/") ||
-    value.includes("/i/api/") ||
-    value.includes("/2/articles") ||
-    value.includes("articleentity")
-  )
+  if (isGraphqlWriteOperation(url)) return false
+  const op = graphqlOperationName(url)?.toLowerCase()
+  if (op && ARTICLE_READ_OPS.has(op)) return true
+  return /ArticleEntityResultByRestId|ArticleByRestId/i.test(url)
+}
+
+export function isSafeArticleReplayUrl(url: string): boolean {
+  return isArticleApiUrl(url) && !isGraphqlWriteOperation(url)
 }
 
 export function requestMentionsArticle(

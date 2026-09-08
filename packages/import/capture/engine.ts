@@ -13,6 +13,7 @@ import {
 	hasFullArticleBody,
 	isRicherArticlePayload,
 	mergeArticleIntoTweet,
+	stampArticleRaw,
 	type GraphQLArticleResult,
 } from "../src/article";
 import { applySortIndexes } from "../src/sort-index";
@@ -43,7 +44,7 @@ export interface CaptureEngineOptions {
 	storage?: CaptureStorage;
 	onCountChange?: (count: number) => void;
 	onToast?: (message: string, color?: string) => void;
-	onArticleBody?: (article: GraphQLArticleResult) => void;
+	onArticleBody?: (article: GraphQLArticleResult, raw: unknown) => void;
 	onCapture?: (detail: CaptureEventDetail) => void;
 	onTweetObserved?: (tweetId: string) => void;
 	persistDebounceMs?: number;
@@ -92,7 +93,7 @@ export class CaptureEngine {
 	private readonly storage?: CaptureStorage;
 	private readonly onCountChange?: (count: number) => void;
 	private readonly onToast?: (message: string, color?: string) => void;
-	private readonly onArticleBody?: (article: GraphQLArticleResult) => void;
+	private readonly onArticleBody?: (article: GraphQLArticleResult, raw: unknown) => void;
 	private readonly onCapture?: (detail: CaptureEventDetail) => void;
 	private readonly onTweetObserved?: (tweetId: string) => void;
 	private readonly observedTweets: Set<string>;
@@ -329,7 +330,7 @@ export class CaptureEngine {
 		applySortIndexes(this.tweets, d);
 		const hydrated = findHydratedArticleResult(d);
 		if (hydrated && hasFullArticleBody(hydrated)) {
-			this.onArticleBody?.(hydrated);
+			this.onArticleBody?.(hydrated, d);
 		}
 		this.schedulePersist();
 	}
@@ -431,6 +432,7 @@ export function buildArticleHydrationPayload(
 	article: GraphQLArticleResult,
 	source: ExportPayload["source"] = "bookmark",
 	pageUrl = "",
+	raw?: unknown,
 ): ExportPayload {
 	let pathname = `/i/article/${article.rest_id ?? ""}`;
 	try {
@@ -438,17 +440,32 @@ export function buildArticleHydrationPayload(
 	} catch {
 		/* keep default */
 	}
+	const tweet = stampArticleRaw(
+		mergeArticleIntoTweet(
+			{ __typename: "Tweet", rest_id: tweetId },
+			article,
+		),
+		raw,
+	);
 	return {
 		exportVersion: 2,
 		exportedAt: new Date().toISOString(),
 		source,
 		origin: "x-article-hydrate",
 		page: { url: pageUrl, pathname },
-		stats: { tweetCount: 1, responseCount: 0 },
-		tweets: {
-			[tweetId]: mergeArticleIntoTweet({ rest_id: tweetId }, article),
-		},
-		responses: [],
+		stats: { tweetCount: 1, responseCount: raw != null ? 1 : 0 },
+		tweets: { [tweetId]: tweet },
+		responses:
+			raw != null
+				? [
+						{
+							url: pageUrl,
+							method: "GET",
+							capturedAt: new Date().toISOString(),
+							data: raw,
+						},
+					]
+				: [],
 	};
 }
 

@@ -21,6 +21,8 @@ import {
 	findHydratedArticleResult,
 	hasFullArticleBody,
 	isArticleUnavailablePayload,
+	isSafeArticleReplayUrl,
+	isGraphqlWriteOperation,
 	type ArticleQueueItem,
 	type GraphQLArticleResult,
 } from "@repo/import";
@@ -423,6 +425,11 @@ async function runTimelinePages(): Promise<void> {
 	try {
 		let job = await idbGet<TimelineJob>(TIMELINE_JOB_KEY);
 		if (!job) return;
+		if (isGraphqlWriteOperation(job.request.url)) {
+			await idbDelete(TIMELINE_JOB_KEY);
+			await chrome.alarms.clear(TIMELINE_ALARM);
+			return;
+		}
 		const settings = await loadSettings();
 		if (settings.mode !== "api" || !settings.serverUrl) return;
 
@@ -571,6 +578,10 @@ async function hydrateArticleDirect(
 ): Promise<"ok" | "unavailable" | "retry" | "tab"> {
 	const template = await idbGet<ArticleRequestTemplate>(ARTICLE_TEMPLATE_KEY);
 	if (!template) return "tab";
+	if (!isSafeArticleReplayUrl(template.url) || isGraphqlWriteOperation(template.url)) {
+		await idbDelete(ARTICLE_TEMPLATE_KEY);
+		return "tab";
+	}
 	const settings = await loadSettings();
 	if (settings.mode !== "api" || !settings.serverUrl) return "tab";
 
@@ -614,18 +625,19 @@ async function hydrateArticleDirect(
 			return "unavailable";
 		}
 		const article = findHydratedArticleResult(data);
-		if (!article || !hasFullArticleBody(article)) {
-			return "tab";
-		}
 		await uploadPayload(
 			buildArticleHydrationPayload(
 				next.tweetId,
-				article,
+				article ?? { rest_id: next.articleId },
 				"bookmark",
 				next.url,
+				data,
 			),
 			settings.serverUrl,
 		);
+		if (!article || !hasFullArticleBody(article)) {
+			return "tab";
+		}
 		await updateArticleQueue((items) =>
 			markArticleSuccess(items, next.articleId),
 		);
@@ -750,6 +762,7 @@ async function failTab(tabId: number, error: string): Promise<void> {
 async function captureArticleBody(
 	article: GraphQLArticleResult,
 	senderTabId?: number,
+	raw?: unknown,
 ): Promise<void> {
 	if (!hasFullArticleBody(article)) return;
 	const articleId = article.rest_id ?? null;
@@ -786,6 +799,7 @@ async function captureArticleBody(
 			article,
 			"bookmark",
 			opened?.url ?? queued?.url ?? articleUrl(articleId),
+			raw,
 		);
 		await uploadPayload(payload, settings.serverUrl);
 		await updateArticleQueue((items) => markArticleSuccess(items, articleId));
@@ -849,6 +863,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 					String(message.articleId),
 				);
 				if (!template) return { accepted: false };
+				if (!isSafeArticleReplayUrl(template.url)) {
+					return { accepted: false };
+				}
 				const existing = await idbGet<ArticleRequestTemplate>(ARTICLE_TEMPLATE_KEY);
 				if (
 					existing &&
@@ -864,6 +881,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 				await captureArticleBody(
 					message.article as GraphQLArticleResult,
 					sender.tab?.id,
+					message.raw,
 				);
 				return { ok: true };
 			case "bp-article-unavailable":

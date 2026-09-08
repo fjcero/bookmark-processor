@@ -74,11 +74,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 	};
 
 	const stages = selectedStages(prefs);
+	const affectedItemIds = results.flatMap((r) => r.affectedItemIds ?? []);
 	let processing = false;
-	if (stages.length > 0 && totals.items.imported > 0) {
+	if (stages.length > 0 && affectedItemIds.length > 0) {
 		if (getProcessState().status !== "running") {
 			processing = true;
-			void startProcess({ stages });
+			void startProcess({ stages, itemIds: affectedItemIds });
 		}
 	}
 

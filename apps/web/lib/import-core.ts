@@ -1,6 +1,7 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import {
 	articlePlainText,
+	articleRawFrom,
 	articleResultFromTweet,
 	articleRestId,
 	articleUrl,
@@ -11,8 +12,9 @@ import {
 	mergeArticleIntoTweet,
 	parseExportV2,
 	compareSortIndex,
+	stampArticleRaw,
 } from "@repo/import";
-import { db, imports, itemCategories, items, users } from "@repo/db";
+import { db, imports, items, users } from "@repo/db";
 import { createId } from "@/lib/ids";
 
 export interface ImportResult {
@@ -20,6 +22,7 @@ export interface ImportResult {
 	parsed: { users: number; items: number };
 	users: { imported: number; skipped: number };
 	items: { imported: number; skipped: number };
+	affectedItemIds: string[];
 	error?: string;
 }
 
@@ -38,6 +41,7 @@ export async function importExportJson(
 			parsed: { users: 0, items: 0 },
 			users: { imported: 0, skipped: 0 },
 			items: { imported: 0, skipped: 0 },
+			affectedItemIds: [],
 			error: msg,
 		};
 	}
@@ -103,7 +107,9 @@ export async function importExportJson(
 		existingItems.map((i) => [i.externalId, i]),
 	);
 
-	const newItems = parsed.items.filter((t) => !existingByExternalId.has(t.id));
+	const newItems = parsed.items.filter(
+		(t) => Boolean(t.authorId) && !existingByExternalId.has(t.id),
+	);
 	const kindUpdates = parsed.items.filter((t) => {
 		const existing = existingByExternalId.get(t.id);
 		return existing != null && existing.kind !== t.kind;
@@ -172,7 +178,6 @@ export async function importExportJson(
 			);
 	}
 
-	const fullArticleUpdateIds: string[] = [];
 	for (const item of articleUpdates) {
 		const existing = existingByExternalId.get(item.id);
 		if (!existing) continue;
@@ -184,32 +189,41 @@ export async function importExportJson(
 		} catch {
 			continue;
 		}
+		const incomingRaw = articleRawFrom(incomingTweet);
 		const incomingArticle =
 			articleResultFromTweet(incomingTweet) ??
 			findHydratedArticleResult(incomingTweet);
-		if (!incomingArticle || !hasArticleBody(incomingArticle)) continue;
-		const merged = mergeArticleIntoTweet(existingTweet, incomingArticle);
+		if (
+			(!incomingArticle || !hasArticleBody(incomingArticle)) &&
+			incomingRaw == null
+		) {
+			continue;
+		}
+		const merged = stampArticleRaw(
+			incomingArticle && hasArticleBody(incomingArticle)
+				? mergeArticleIntoTweet(existingTweet, incomingArticle)
+				: existingTweet,
+			incomingRaw,
+		);
 		const mergedArticle =
-			articleResultFromTweet(merged) ?? incomingArticle;
+			findHydratedArticleResult(merged) ??
+			articleResultFromTweet(merged) ??
+			incomingArticle;
 		const articleId = articleRestId(mergedArticle);
-		const full = hasFullArticleBody(mergedArticle);
-		if (full) fullArticleUpdateIds.push(item.id);
+		const full = hasFullArticleBody(
+			mergedArticle ?? findHydratedArticleResult(merged),
+		);
 		await db
 			.update(items)
 			.set({
 				rawJson: JSON.stringify(merged),
-				text: articlePlainText(mergedArticle),
+				text: mergedArticle
+					? articlePlainText(mergedArticle)
+					: item.text,
 				contentType: "article",
 				url: articleId ? articleUrl(articleId) : item.url,
 				hydrateRequestedAt: full ? null : existing.hydrateRequestedAt,
 				captureUnavailableAt: null,
-				...(full
-					? {
-							entities: null,
-							understanding: null,
-							categorizedAt: null,
-						}
-					: {}),
 				importedAt: now,
 			})
 			.where(and(eq(items.source, source), eq(items.externalId, item.id)));
@@ -223,8 +237,8 @@ export async function importExportJson(
 			try {
 				const incoming = JSON.parse(item.rawJson) as unknown;
 				const article =
-					articleResultFromTweet(incoming) ??
-					findHydratedArticleResult(incoming);
+					findHydratedArticleResult(incoming) ??
+					articleResultFromTweet(incoming);
 				return article != null && hasFullArticleBody(article);
 			} catch {
 				return false;
@@ -240,22 +254,6 @@ export async function importExportJson(
 			);
 	}
 
-	if (fullArticleUpdateIds.length > 0) {
-		const rows = await db
-			.select({ id: items.id })
-			.from(items)
-			.where(
-				and(
-					eq(items.source, source),
-					inArray(items.externalId, fullArticleUpdateIds),
-				),
-			);
-		const ids = rows.map((row) => row.id);
-		if (ids.length > 0) {
-			await db.delete(itemCategories).where(inArray(itemCategories.itemId, ids));
-		}
-	}
-
 	const usersImported = parsed.users.filter(
 		(u) => !existingUserIds.has(u.id),
 	).length;
@@ -264,6 +262,25 @@ export async function importExportJson(
 	const kindOnly = kindUpdates.filter((item) => !articleUpdatedIds.has(item.id));
 	const itemsImported = newItems.length + kindOnly.length + articleUpdates.length;
 	const itemsSkipped = parsed.items.length - itemsImported;
+
+	const processExternalIds = [
+		...newItems.map((item) => item.id),
+		...kindOnly.map((item) => item.id),
+	];
+	const affectedItemIds =
+		processExternalIds.length > 0
+			? (
+					await db
+						.select({ id: items.id })
+						.from(items)
+						.where(
+							and(
+								eq(items.source, source),
+								inArray(items.externalId, processExternalIds),
+							),
+						)
+				).map((row) => row.id)
+			: [];
 
 	await db.insert(imports).values({
 		id: createId(),
@@ -279,5 +296,6 @@ export async function importExportJson(
 		parsed: { users: parsed.users.length, items: parsed.items.length },
 		users: { imported: usersImported, skipped: usersSkipped },
 		items: { imported: itemsImported, skipped: itemsSkipped },
+		affectedItemIds,
 	};
 }

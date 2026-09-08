@@ -64,7 +64,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     )
   }
 
-  void startProcess({ force, stages, itemIds, model })
+  void startProcess({
+    force,
+    stages: stagesProvided ? stages : undefined,
+    itemIds,
+    model,
+  })
   return NextResponse.json({ ok: true, status: 'running', refetchQueued })
 }
 

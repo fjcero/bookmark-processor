@@ -13,7 +13,8 @@ import { categories, db, itemCategories, items, users } from "@repo/db";
 import {
 	articleResultFromTweet,
 	derivePostFormat,
-	hasFullArticleBody,
+	findHydratedArticleResult,
+	hasCompleteArticleRaw,
 	isPendingArticleRaw,
 	pendingArticleFromRaw,
 	type ContentType,
@@ -277,7 +278,8 @@ function mapItemRows(
 		} catch {
 			parsed = null;
 		}
-		const article = articleResultFromTweet(parsed);
+		const article =
+			articleResultFromTweet(parsed) ?? findHydratedArticleResult(parsed);
 		const contentType = (r.contentType as ContentType) || "post";
 		return {
 			id: r.id,
@@ -287,7 +289,7 @@ function mapItemRows(
 			kind: r.kind,
 			contentType,
 			postFormat: derivePostFormat(parsed),
-			articleHydrated: hasFullArticleBody(article),
+			articleHydrated: hasCompleteArticleRaw(parsed),
 			articleRefetching: r.hydrateRequestedAt != null,
 			articleTitle: article?.title?.trim() || null,
 			articlePreview: article?.preview_text?.trim() || null,
@@ -424,13 +426,26 @@ export async function getPendingArticles(limit = 40): Promise<PendingArticle[]> 
 
 	const pending: PendingArticle[] = [];
 	const seen = new Set<string>();
+	const completed: string[] = [];
 	for (const row of refetchRows) {
 		const item = pendingFromRow(row, true);
-		if (!item || seen.has(item.articleId)) continue;
+		if (!item) {
+			completed.push(row.id);
+			continue;
+		}
+		if (seen.has(item.articleId)) continue;
 		pending.push(item);
 		seen.add(item.articleId);
-		if (pending.length >= cap) return pending;
+		if (pending.length >= cap) break;
 	}
+	if (completed.length > 0) {
+		await db
+			.update(items)
+			.set({ hydrateRequestedAt: null })
+			.where(inArray(items.id, completed));
+	}
+	if (pending.length >= cap) return pending;
+	if (pending.length > 0) return pending;
 
 	const rows = await db
 		.select(pendingArticleSelect)
@@ -464,7 +479,11 @@ export async function requestArticleRefetch(opts: {
 
 	if (itemIds && itemIds.length > 0) {
 		const rows = await db
-			.select({ id: items.id })
+			.select({
+				id: items.id,
+				rawJson: items.rawJson,
+				contentType: items.contentType,
+			})
 			.from(items)
 			.where(
 				and(
@@ -473,7 +492,9 @@ export async function requestArticleRefetch(opts: {
 					inArray(items.id, itemIds),
 				),
 			);
-		const ids = rows.map((row) => row.id);
+		const ids = rows
+			.filter((row) => isPendingArticleRaw(row.rawJson, row.contentType))
+			.map((row) => row.id);
 		if (ids.length === 0) return { queued: 0 };
 		await db
 			.update(items)
@@ -483,17 +504,26 @@ export async function requestArticleRefetch(opts: {
 	}
 
 	if (opts.all) {
-		const [{ total }] = await db
-			.select({ total: count() })
+		const rows = await db
+			.select({
+				id: items.id,
+				rawJson: items.rawJson,
+				contentType: items.contentType,
+			})
 			.from(items)
 			.where(and(listed, eq(items.contentType, "article")));
-		const queued = asCount(total);
-		if (queued === 0) return { queued: 0 };
-		await db
-			.update(items)
-			.set({ hydrateRequestedAt: now, captureUnavailableAt: null })
-			.where(and(listed, eq(items.contentType, "article")));
-		return { queued };
+		const ids = rows
+			.filter((row) => isPendingArticleRaw(row.rawJson, row.contentType))
+			.map((row) => row.id);
+		if (ids.length === 0) return { queued: 0 };
+		const CHUNK = 400;
+		for (let i = 0; i < ids.length; i += CHUNK) {
+			await db
+				.update(items)
+				.set({ hydrateRequestedAt: now, captureUnavailableAt: null })
+				.where(inArray(items.id, ids.slice(i, i + CHUNK)));
+		}
+		return { queued: ids.length };
 	}
 
 	const rows = await db

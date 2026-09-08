@@ -1112,13 +1112,12 @@ function ProcessMenu({
 
 	function run() {
 		if (!canRun) return;
-		const captureThisArticle = needsArticleCapture && scope === "item";
 		onRun({
-			stages: captureThisArticle ? [] : selectedStages,
+			stages: selectedStages,
 			force: scope !== "pending",
 			itemIds: scope === "item" && itemId ? [itemId] : undefined,
 			model,
-			refetch: refetch || captureThisArticle || scope === "pending",
+			refetch: Boolean(refetch && (scope !== "item" || needsArticleCapture)),
 		});
 		setOpen(false);
 	}
@@ -1234,6 +1233,7 @@ function ProcessMenu({
 						Used for understanding and categorize.
 					</p>
 
+					{scope !== "item" || needsArticleCapture ? (
 					<label className="mt-3 flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 hover:bg-zinc-900">
 						<input
 							type="checkbox"
@@ -1245,11 +1245,16 @@ function ProcessMenu({
 							<span className="block text-sm text-zinc-200">Refetch from X</span>
 							<span className="block text-xs text-zinc-500">
 								{needsArticleCapture
-									? "Required — this article still only has a preview."
-									: "Ask the extension to capture this again."}
+									? "Raw article body is still missing — capture it from X."
+									: "Only articles whose stored raw is still a preview."}
 							</span>
 						</span>
 					</label>
+					) : (
+						<p className="mt-3 text-xs text-zinc-600">
+							Raw article body is already stored. Refetch from X is skipped.
+						</p>
+					)}
 
 					<button
 						type="button"

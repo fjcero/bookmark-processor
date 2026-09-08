@@ -304,7 +304,7 @@ export async function startProcess(
 		options.itemIds && options.itemIds.length > 0 ? options.itemIds : null;
 	if (options.model) setActiveModel(options.model);
 	const enabled = new Set<Stage>(
-		options.stages && options.stages.length > 0
+		options.stages !== undefined
 			? options.stages
 			: ["entities", "understanding", "categorize"],
 	);

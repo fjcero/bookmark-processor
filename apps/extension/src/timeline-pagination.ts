@@ -1,5 +1,5 @@
 import type { CaptureEventDetail } from "@repo/import/capture/hooks-events";
-import { applySortIndexes } from "@repo/import";
+import { applySortIndexes, isGraphqlWriteOperation } from "@repo/import";
 
 export interface TimelineJob {
 	source: "bookmark" | "like" | "history";
@@ -99,6 +99,7 @@ export function createTimelineJob(
 	pageUrl: string,
 ): TimelineJob | null {
 	if (!detail.request || !detail.url.includes("/graphql/")) return null;
+	if (isGraphqlWriteOperation(detail.url)) return null;
 	const cursor = findBottomCursor(detail.data);
 	if (!cursor || Object.keys(collectTimelineTweets(detail.data)).length === 0) {
 		return null;

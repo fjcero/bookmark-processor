@@ -255,13 +255,14 @@ function startArticlePageCapture(): void {
 		location.pathname.match(/\/i\/article\/(\d+)/)?.[1] ?? "";
 	let bodySent = false;
 
-	const sendArticleBody = (article: GraphQLArticleResult) => {
+	const sendArticleBody = (article: GraphQLArticleResult, raw?: unknown) => {
 		if (bodySent || !hasFullArticleBody(article)) return;
 		bodySent = true;
 		try {
 			void chrome.runtime.sendMessage({
 				type: "bp-article-body",
 				article,
+				raw,
 			});
 		} catch {
 			/* ignore */
@@ -282,11 +283,14 @@ function startArticlePageCapture(): void {
 				/* ignore */
 			}
 		},
-		onArticleBody: (article: GraphQLArticleResult) => {
-			sendArticleBody({
-				...article,
-				hydration_source: article.hydration_source ?? "graphql",
-			});
+		onArticleBody: (article: GraphQLArticleResult, raw: unknown) => {
+			sendArticleBody(
+				{
+					...article,
+					hydration_source: article.hydration_source ?? "graphql",
+				},
+				raw,
+			);
 		},
 	});
 	articleEngine.start();

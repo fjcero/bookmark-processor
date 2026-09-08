@@ -3,7 +3,7 @@
  */
 
 import { enqueueCapture } from "./hooks-events";
-import { withArticleBodyToggles } from "../src/article-request";
+import { isSafeArticleReplayUrl, withArticleBodyToggles } from "../src/article-request";
 
 export type CaptureCallback = (
 	data: unknown,
@@ -48,7 +48,7 @@ function rewriteArticleRequest(
 ): { input: RequestInfo | URL; init?: RequestInit } {
 	if (!isArticlePage()) return { input, init };
 	const url = input instanceof Request ? input.url : String(input);
-	if (!url.includes("/graphql/")) return { input, init };
+	if (!isSafeArticleReplayUrl(url)) return { input, init };
 	const body = typeof init?.body === "string" ? init.body : undefined;
 	const rewritten = withArticleBodyToggles(url, body);
 	let nextInput: RequestInfo | URL = input;

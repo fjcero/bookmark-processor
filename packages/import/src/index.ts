@@ -23,9 +23,11 @@ export {
   stampSortIndex,
 } from './sort-index'
 export {
+  ARTICLE_RAW_KEY,
   articleCoverUrl,
   articleMediaUrls,
   articlePlainText,
+  articleRawFrom,
   articleRestId,
   articleResultFromTweet,
   articleUrl,
@@ -35,6 +37,7 @@ export {
   flattenArticleBlocks,
   hasArticleBody,
   hasFullArticleBody,
+  hasCompleteArticleRaw,
   isArticleWrapper,
   isArticleUnavailableDocument,
   isArticleUnavailablePayload,
@@ -44,11 +47,15 @@ export {
   mergeArticleIntoTweet,
   mergeArticleResults,
   pendingArticleFromRaw,
+  stampArticleRaw,
   type PendingArticleRef,
 } from './article'
 export {
   enableArticleBodyFieldToggles,
+  graphqlOperationName,
   isArticleApiUrl,
+  isGraphqlWriteOperation,
+  isSafeArticleReplayUrl,
   requestMentionsArticle,
   withArticleBodyToggles,
 } from './article-request'
