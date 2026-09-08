@@ -17,8 +17,8 @@ import {
 	createBackgroundStorageAdapter,
 	enqueueImportsInBackground,
 	fetchTotalInBackground,
-} from "./background-client";
-import { loadSettings } from "./storage";
+} from "./core/background-client";
+import { loadSettings } from "./core/storage";
 import {
 	mountSidebarUiWithRetry,
 	setArticleStatus,
@@ -317,7 +317,11 @@ function scheduleAutoSync(): void {
 	void (async () => {
 		try {
 			const settings = await loadSettings();
-			if (!settings.autoSync || settings.mode !== "api" || !settings.serverUrl) {
+			if (
+				!settings.autoSync ||
+				settings.mode !== "api" ||
+				!settings.serverUrl
+			) {
 				return;
 			}
 			if (syncing) {
@@ -450,11 +454,7 @@ function handleAutoScroll(): void {
 					autoScrolling = false;
 					reportCaptureScroll(false);
 					stopRetryWatcher();
-					setAutoScrollUi(
-						sidebar,
-						"done",
-						engine.observedCount(),
-					);
+					setAutoScrollUi(sidebar, "done", engine.observedCount());
 					void performSync({ auto: true });
 				}
 			},

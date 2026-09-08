@@ -16,7 +16,7 @@ export default defineConfig(({ mode }) => {
 		: isContent
 			? "src/content.ts"
 			: isBackground
-				? "src/background.ts"
+				? "src/background/index.ts"
 				: "src/popup.ts";
 	const outFile = isInject
 		? "capture-inject.js"

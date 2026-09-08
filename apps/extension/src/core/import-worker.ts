@@ -4,6 +4,8 @@ import {
 	type ExportPayload,
 } from "@repo/import/capture/engine";
 import type { ImportWorkerProgress } from "@repo/import";
+import { broadcastToTabs } from "./broadcast";
+import { CAPTURE_KEY } from "./constants";
 import {
 	idbDelete,
 	idbDeleteManyFromStore,
@@ -15,9 +17,9 @@ import {
 	idbUpdate,
 	IMPORT_QUEUE_STORE,
 } from "./idb";
+import { allTabUrlPatterns } from "./platform";
 import { loadSettings } from "./storage";
 
-const CAPTURE_KEY = "capture";
 const LEGACY_IMPORT_QUEUE_KEY = "bp-import-worker";
 const IMPORT_META_KEY = "bp-import-worker-meta";
 export const IMPORT_QUEUE_ALARM = "bp-import-worker-next";
@@ -103,14 +105,14 @@ function singleTweetPayload(
 }
 
 function batchPayload(entries: ImportWorkerEntry[]): ExportPayload {
-	const first = entries[0]!.payload;
+	const first = entries[0]!;
 	const tweets: Record<string, unknown> = {};
 	for (const entry of entries) {
 		const tweet = entry.payload.tweets[entry.externalId];
 		if (tweet != null) tweets[entry.externalId] = tweet;
 	}
 	return {
-		...first,
+		...first.payload,
 		stats: { tweetCount: Object.keys(tweets).length, responseCount: 0 },
 		tweets,
 		responses: [],
@@ -177,20 +179,10 @@ function notifyProgress(progress: ImportWorkerProgress): void {
 }
 
 async function broadcast(progress: ImportWorkerProgress): Promise<void> {
-	const tabs = await chrome.tabs.query({
-		url: ["https://x.com/*", "https://twitter.com/*"],
+	await broadcastToTabs(allTabUrlPatterns(), {
+		type: "bp-import-progress",
+		progress,
 	});
-	await Promise.all(
-		tabs
-			.filter((tab) => tab.id != null)
-			.map((tab) =>
-				chrome.tabs
-					.sendMessage(tab.id!, { type: "bp-import-progress", progress })
-					.catch(() => {
-						/* no capture content script */
-					}),
-			),
-	);
 }
 
 function progressOf(

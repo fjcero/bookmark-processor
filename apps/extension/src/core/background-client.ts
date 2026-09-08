@@ -13,7 +13,9 @@ interface WorkerResponse<T> {
 
 async function request<T>(message: unknown): Promise<T> {
 	try {
-		const response = (await chrome.runtime.sendMessage(message)) as WorkerResponse<T>;
+		const response = (await chrome.runtime.sendMessage(
+			message,
+		)) as WorkerResponse<T>;
 		if (!response?.ok) {
 			throw new Error(response?.error ?? "Background worker unavailable");
 		}
@@ -61,4 +63,3 @@ export async function fetchTotalInBackground(
 	});
 	return result.total;
 }
-

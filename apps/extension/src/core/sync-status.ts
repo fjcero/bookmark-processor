@@ -3,26 +3,19 @@ import type {
 	SyncRevocation,
 	SyncStatusResponse,
 } from "@repo/import";
-import { markArticleRemoved } from "@repo/import";
 import type { CaptureState } from "@repo/import/capture/engine";
+import { CAPTURE_KEY } from "./constants";
 import { idbGet, idbSet } from "./idb";
-import {
-	loadArticleQueue,
-	loadHydrationState,
-	updateArticleQueue,
-} from "./article-queue";
-
-const CAPTURE_KEY = "capture";
 
 export async function buildExtensionStatusReport(input: {
 	articles: ExtensionStatusReport["articles"];
 	articleQueue?: ExtensionStatusReport["articleQueue"];
 	importWorker?: ExtensionStatusReport["importWorker"];
 	captureScrollActive?: boolean;
+	rateLimitedUntil?: number;
 	lastError?: string;
 }): Promise<ExtensionStatusReport> {
 	const capture = await idbGet<CaptureState>(CAPTURE_KEY);
-	const hydration = await loadHydrationState();
 
 	return {
 		capturedUnsynced: Object.keys(capture?.tweets ?? {}).length,
@@ -32,7 +25,7 @@ export async function buildExtensionStatusReport(input: {
 		articleQueue: input.articleQueue,
 		importWorker: input.importWorker,
 		captureScrollActive: input.captureScrollActive,
-		rateLimitedUntil: hydration.rateLimitedUntil,
+		rateLimitedUntil: input.rateLimitedUntil,
 		lastError: input.lastError,
 		reportedAt: new Date().toISOString(),
 	};
@@ -53,7 +46,7 @@ export async function postSyncStatus(
 	return (await res.json()) as SyncStatusResponse;
 }
 
-export async function applySyncRevocations(
+export async function applyCaptureRevocations(
 	revocations: SyncRevocation[],
 ): Promise<string[]> {
 	if (revocations.length === 0) return [];
@@ -66,16 +59,6 @@ export async function applySyncRevocations(
 		}
 		await idbSet(CAPTURE_KEY, capture);
 	}
-
-	await updateArticleQueue((queue) => {
-		let next = queue;
-		for (const rev of revocations) {
-			if (rev.articleId) {
-				next = markArticleRemoved(next, rev.articleId);
-			}
-		}
-		return next;
-	});
 
 	return revocations.map((rev) => rev.id);
 }

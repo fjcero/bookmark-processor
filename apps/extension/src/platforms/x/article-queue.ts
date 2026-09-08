@@ -6,7 +6,7 @@ import {
 	type ArticleHydrationState,
 	type ArticleQueueItem,
 } from "@repo/import";
-import { idbDelete, idbGet, idbSet, idbUpdate } from "./idb";
+import { idbGet, idbSet, idbUpdate } from "../../core/idb";
 
 const HYDRATION_KEY = "bp-article-hydration";
 const LEGACY_QUEUE_KEY = "bp-article-queue";

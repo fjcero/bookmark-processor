@@ -25,8 +25,7 @@ export function createArticleRequestTemplate(
 	}
 	const article = findHydratedArticleResult(detail.data);
 	const articleId =
-		articleRestId(article) ??
-		(pageArticleId.length > 0 ? pageArticleId : null);
+		articleRestId(article) ?? (pageArticleId.length > 0 ? pageArticleId : null);
 	if (!articleId) return null;
 	return {
 		articleId,
@@ -108,6 +107,7 @@ export function requestForArticle(
 		url.pathname = url.pathname.replace(template.articleId, articleId);
 		replaced = true;
 	}
-	if (!replaced) throw new Error("Article request does not contain its article id");
+	if (!replaced)
+		throw new Error("Article request does not contain its article id");
 	return withArticleBodyToggles(url.toString(), body);
 }

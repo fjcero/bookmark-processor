@@ -6,12 +6,12 @@ Inspired by [chrome-extension-boilerplate-react-vite](https://github.com/Jonghak
 
 ## Why an extension over a bookmarklet?
 
-| | Bookmarklet | Extension |
-|--|-------------|-----------|
-| Persistence | Lost on page refresh | `chrome.storage.local` survives refresh |
-| Error recovery | try/catch per response | Same + state restored after crash |
-| API upload | CORS + manual server URL | Native fetch to your server |
-| Re-activation | Click bookmark each visit | Auto-starts on bookmarks/likes pages |
+|                | Bookmarklet               | Extension                               |
+| -------------- | ------------------------- | --------------------------------------- |
+| Persistence    | Lost on page refresh      | `chrome.storage.local` survives refresh |
+| Error recovery | try/catch per response    | Same + state restored after crash       |
+| API upload     | CORS + manual server URL  | Native fetch to your server             |
+| Re-activation  | Click bookmark each visit | Auto-starts on bookmarks/likes pages    |
 
 ## Build
 
@@ -47,3 +47,13 @@ Rebuilds on save. After each change:
 - **Load `apps/extension/dist`** (not `public/`). The built `content.js` and `capture-inject.js` live in `dist/`.
 - **Errors after reloading the extension**: refresh the X tab. Chrome invalidates the old content-script context.
 - **Sidebar missing**: wait a few seconds for X's layout, or scroll once — the panel mounts below the search box in the right column.
+
+## Adding a future platform
+
+X is registered from `src/background/index.ts` via `createXPlatform()`. To add LinkedIn (or similar):
+
+1. Create `src/platforms/linkedin/` with `index.ts`, handlers, and any enrichment worker.
+2. Call `registerPlatform(createLinkedInPlatform())` from `background/index.ts`, then `registerMessageHandlers` / `registerAlarmHandlers`.
+3. Add host permissions and `content_scripts` in `public/manifest.json` (or a build-time manifest merge).
+4. Add a parse/upload package (e.g. `packages/import-linkedin`) for that source.
+5. Implement `buildStatusSlice()` — it can return empty article counts at first if the server report stays X-centric.

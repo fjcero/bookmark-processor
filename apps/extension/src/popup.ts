@@ -1,9 +1,17 @@
-import { clampScrollDelayMs, loadSettings, saveSettings } from "./storage";
+import {
+	clampArticleDirectBatch,
+	clampScrollDelayMs,
+	loadSettings,
+	saveSettings,
+} from "./core/storage";
 
 const serverUrlInput = document.getElementById("serverUrl") as HTMLInputElement;
 const autoSyncInput = document.getElementById("autoSync") as HTMLInputElement;
 const scrollDelayInput = document.getElementById(
 	"scrollDelayMs",
+) as HTMLInputElement;
+const articleDirectBatchInput = document.getElementById(
+	"articleDirectBatch",
 ) as HTMLInputElement;
 const saveBtn = document.getElementById("save") as HTMLButtonElement;
 const toggleBtn = document.getElementById("toggle") as HTMLButtonElement;
@@ -32,7 +40,8 @@ async function refreshStatus() {
 			statusEl.textContent = "Capture inactive on this tab";
 		}
 	} catch {
-		statusEl.textContent = "Open x.com bookmarks, likes, or history, then try again";
+		statusEl.textContent =
+			"Open x.com bookmarks, likes, or history, then try again";
 	}
 }
 
@@ -41,6 +50,7 @@ async function init() {
 	serverUrlInput.value = settings.serverUrl;
 	autoSyncInput.checked = settings.autoSync;
 	scrollDelayInput.value = String(settings.scrollDelayMs);
+	articleDirectBatchInput.value = String(settings.articleDirectBatch);
 	for (const input of document.querySelectorAll<HTMLInputElement>(
 		'input[name="mode"]',
 	)) {
@@ -55,6 +65,9 @@ saveBtn.addEventListener("click", async () => {
 		mode: selectedMode(),
 		autoSync: autoSyncInput.checked,
 		scrollDelayMs: clampScrollDelayMs(Number(scrollDelayInput.value)),
+		articleDirectBatch: clampArticleDirectBatch(
+			Number(articleDirectBatchInput.value),
+		),
 	});
 	statusEl.textContent = "Settings saved";
 });

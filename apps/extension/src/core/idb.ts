@@ -82,9 +82,7 @@ export async function idbUpdate<T>(
 	});
 }
 
-export async function idbGetAllFromStore<T>(
-	storeName: string,
-): Promise<T[]> {
+export async function idbGetAllFromStore<T>(storeName: string): Promise<T[]> {
 	const db = await openDb();
 	return new Promise((resolve, reject) => {
 		const tx = db.transaction(storeName, "readonly");
