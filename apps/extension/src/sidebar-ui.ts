@@ -144,34 +144,45 @@ export function buildSidebarPanel(opts: {
 	body.className = "bp-sidebar-card__body";
 
 	const postsEl = document.createElement("strong");
-	postsEl.textContent = "—";
+	postsEl.className = "bp-sidebar-card__metric-value";
+	postsEl.textContent = "0";
 
 	const postsLabel = document.createElement("span");
+	postsLabel.className = "bp-sidebar-card__metric-label";
 	postsLabel.textContent = "Posts";
 
 	const postsMetric = document.createElement("div");
 	postsMetric.className = "bp-sidebar-card__metric";
-	postsMetric.append(postsEl, postsLabel);
+	postsMetric.append(postsLabel, postsEl);
 
 	const articlesEl = document.createElement("strong");
-	articlesEl.textContent = "—";
+	articlesEl.className = "bp-sidebar-card__metric-value";
+	articlesEl.textContent = "0";
 
 	const articlesLabel = document.createElement("span");
+	articlesLabel.className = "bp-sidebar-card__metric-label";
 	articlesLabel.textContent = "Articles";
+
+	const articleEl = document.createElement("span");
+	articleEl.className =
+		"bp-sidebar-card__metric-sub bp-sidebar-card__metric-sub--empty";
+	articleEl.textContent = "0 in queue";
 
 	const articlesMetric = document.createElement("div");
 	articlesMetric.className = "bp-sidebar-card__metric";
-	articlesMetric.append(articlesEl, articlesLabel);
+	articlesMetric.append(articlesLabel, articlesEl, articleEl);
 
 	const totalEl = document.createElement("strong");
-	totalEl.textContent = "—";
+	totalEl.className = "bp-sidebar-card__metric-value";
+	totalEl.textContent = "0";
 
 	const totalLabel = document.createElement("span");
+	totalLabel.className = "bp-sidebar-card__metric-label";
 	totalLabel.textContent = "In library";
 
 	const totalMetric = document.createElement("div");
 	totalMetric.className = "bp-sidebar-card__metric";
-	totalMetric.append(totalEl, totalLabel);
+	totalMetric.append(totalLabel, totalEl);
 
 	const metrics = document.createElement("div");
 	metrics.className = "bp-sidebar-card__metrics";
@@ -195,16 +206,12 @@ export function buildSidebarPanel(opts: {
 	retryBtn.textContent = "Retry sync";
 	retryBtn.addEventListener("click", opts.onSyncRetry);
 
-	const articleEl = document.createElement("p");
-	articleEl.className = "bp-sidebar-card__hint";
-	articleEl.textContent = "Articles idle";
-
 	const hint = document.createElement("p");
 	hint.className = "bp-sidebar-card__hint";
 	hint.textContent = `${opts.label} sync automatically while you scroll.`;
 
 	actions.append(autoBtn, retryBtn);
-	body.append(metrics, actions, articleEl, hint);
+	body.append(metrics, actions, hint);
 	root.append(header, body);
 
 	return {
@@ -226,7 +233,11 @@ export interface LibraryStatsView {
 }
 
 function formatCount(value: number | null): string {
-	return value == null ? "—" : value.toLocaleString();
+	return value == null ? "0" : value.toLocaleString();
+}
+
+function setMetricValue(el: HTMLElement, value: number | null): void {
+	el.textContent = formatCount(value);
 }
 
 export function updateLibraryStats(
@@ -234,24 +245,21 @@ export function updateLibraryStats(
 	stats: LibraryStatsView | null,
 ): void {
 	if (!stats) {
-		refs.postsEl.textContent = "—";
-		refs.articlesEl.textContent = "—";
-		refs.totalEl.textContent = "—";
+		setMetricValue(refs.postsEl, null);
+		setMetricValue(refs.articlesEl, null);
+		setMetricValue(refs.totalEl, null);
 		return;
 	}
-	refs.postsEl.textContent = formatCount(stats.posts);
-	refs.articlesEl.textContent = formatCount(stats.articles);
-	refs.totalEl.textContent = formatCount(stats.total);
+	setMetricValue(refs.postsEl, stats.posts);
+	setMetricValue(refs.articlesEl, stats.articles);
+	setMetricValue(refs.totalEl, stats.total);
 }
 
 export function updateSessionStats(
 	refs: SidebarUiRefs,
 	stats: { new: number; skipped: number; pending: number },
 ): void {
-	const parts = [
-		`${stats.new} new`,
-		`${stats.skipped} skipped`,
-	];
+	const parts = [`${stats.new} new`];
 	if (stats.pending > 0) {
 		parts.push(`${stats.pending} pending`);
 	}
@@ -270,13 +278,13 @@ export function setSyncStatus(refs: SidebarUiRefs, message: string): void {
 export function setArticleStatus(
 	refs: SidebarUiRefs,
 	stats: { pending: number; fetching: number; ok: number; failed: number; total: number },
-	libraryMissing: number | null = null,
 ): void {
 	const remaining = stats.pending + stats.fetching;
-	refs.articleEl.textContent =
-		libraryMissing != null
-			? `${remaining.toLocaleString()} in queue · ${libraryMissing.toLocaleString()} missing in library`
-			: `${remaining.toLocaleString()} in queue`;
+	refs.articleEl.textContent = `${Math.max(remaining, 0).toLocaleString()} in queue`;
+	refs.articleEl.classList.toggle(
+		"bp-sidebar-card__metric-sub--empty",
+		remaining <= 0,
+	);
 }
 
 export function setSyncRetryVisible(refs: SidebarUiRefs, visible: boolean): void {
@@ -301,7 +309,7 @@ export function setAutoScrollUi(
 		btn.className = "bp-sidebar-card__btn bp-sidebar-card__btn--active";
 		return;
 	}
-	btn.textContent = `Done — ${count ?? 0} captured`;
+	btn.textContent = `Done, ${count ?? 0} captured`;
 	btn.className = "bp-sidebar-card__btn bp-sidebar-card__btn--done";
 }
 

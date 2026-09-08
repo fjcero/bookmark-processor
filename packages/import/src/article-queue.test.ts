@@ -32,7 +32,7 @@ test("picks pending articles and retries with backoff until terminal failure", (
   assert.ok((queue[0]?.nextAt ?? 0) > 1_000);
 
   queue = markArticleSuccess(queue, "a1");
-  assert.equal(queue[0]?.status, "ok");
+  assert.equal(queue.length, 0);
   assert.equal(pickNextArticle(queue, Date.now()), null);
 });
 
@@ -53,12 +53,25 @@ test("stops retrying after max attempts", () => {
   assert.ok((queue[0]?.nextAt ?? 0) > now);
 });
 
-test("re-enqueues successful articles when the server still lists them", () => {
+test("re-enqueues successful articles only when refetch is requested", () => {
   let queue = seed();
   queue = markArticleFetching(queue, "a1");
   queue = markArticleSuccess(queue, "a1");
+  assert.equal(queue.length, 0);
   queue = enqueueArticles(queue, [
     { tweetId: "t1", articleId: "a1", url: "https://x.com/i/article/a1" },
+  ]);
+  assert.equal(queue.length, 1);
+  assert.equal(queue[0]?.status, "pending");
+
+  queue = markArticleSuccess(queue, "a1");
+  queue = enqueueArticles(queue, [
+    {
+      tweetId: "t1",
+      articleId: "a1",
+      url: "https://x.com/i/article/a1",
+      refetch: true,
+    },
   ]);
   assert.equal(queue.length, 1);
   assert.equal(queue[0]?.status, "pending");

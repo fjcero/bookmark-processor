@@ -35,6 +35,7 @@ import { loadSettings } from "../../core/storage";
 import {
 	ALARM_NAME,
 	claimNextArticle,
+	compactArticleQueue,
 	loadArticleQueue,
 	loadHydrationState,
 	noteArticleCompleted,
@@ -43,6 +44,9 @@ import {
 	updateHydrationState,
 	updateArticleQueue,
 } from "./article-queue";
+import {
+	fetchPendingArticleTweetIds,
+} from "@repo/import/capture/engine";
 import {
 	requestForArticle,
 	type ArticleRequestTemplate,
@@ -117,6 +121,20 @@ export async function broadcastStats(): Promise<void> {
 		stats,
 	});
 	scheduleSyncStatusPush();
+}
+
+export async function reconcileArticleQueueWithServer(
+	serverUrl: string,
+): Promise<number> {
+	const pending = new Set(await fetchPendingArticleTweetIds(serverUrl));
+	const before = await loadArticleQueue();
+	const after = before.filter((item) => pending.has(item.tweetId));
+	const removed = before.length - after.length;
+	if (removed > 0) {
+		await updateArticleQueue(() => after);
+		await broadcastStats();
+	}
+	return removed;
 }
 
 export async function ingestPendingFromServer(): Promise<void> {
@@ -441,6 +459,11 @@ export async function captureArticleBody(
 
 export async function bootstrapArticles(): Promise<void> {
 	await recoverInterruptedArticles();
+	await compactArticleQueue();
+	const settings = await loadSettings();
+	if (settings.mode === "api" && settings.serverUrl) {
+		await reconcileArticleQueueWithServer(settings.serverUrl);
+	}
 	await ingestPendingFromServer();
 	await scheduleNext(5_000);
 }

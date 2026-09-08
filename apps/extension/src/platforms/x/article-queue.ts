@@ -67,6 +67,20 @@ export async function updateArticleQueue(
 	return state.queue;
 }
 
+export async function compactArticleQueue(): Promise<void> {
+	await updateArticleQueue((queue) => {
+		const seen = new Set<string>();
+		const next: ArticleQueueItem[] = [];
+		for (const item of queue) {
+			if (item.status === "ok") continue;
+			if (seen.has(item.articleId)) continue;
+			seen.add(item.articleId);
+			next.push(item);
+		}
+		return next;
+	});
+}
+
 export async function noteArticleCompleted(): Promise<void> {
 	await updateHydrationState((state) => ({
 		...state,

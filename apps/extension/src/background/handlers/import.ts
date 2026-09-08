@@ -1,11 +1,18 @@
-import type { ExportPayload, LibraryStats } from "@repo/import/capture/engine";
-import { fetchLibraryStats } from "@repo/import/capture/engine";
+import type { ExportPayload } from "@repo/import/capture/engine";
+import {
+	fetchAllLibraryExternalIds,
+	fetchLibraryStats,
+	fetchTodayImportStats,
+	filterKnownExternalIds,
+} from "@repo/import/capture/engine";
 import {
 	enqueueImportPayload,
 	processNextImport,
 } from "../../core/import-worker";
+import { loadLibraryCache, saveLibraryCache } from "../../core/library-cache";
 import type { MessageRouter } from "../../core/platform";
 import { scheduleSyncStatusPush } from "../sync-server";
+import { reconcileArticleQueueWithServer } from "../../platforms/x/article-hydration";
 
 export function registerImportHandlers(router: MessageRouter): void {
 	router.register("bp-import-enqueue", async (message) => {
@@ -19,5 +26,35 @@ export function registerImportHandlers(router: MessageRouter): void {
 	});
 	router.register("bp-fetch-total", async (message) => {
 		return await fetchLibraryStats(String(message.serverUrl));
+	});
+	router.register("bp-fetch-today", async (message) => {
+		return await fetchTodayImportStats(String(message.serverUrl));
+	});
+	router.register("bp-filter-known", async (message) => {
+		const externalIds = Array.isArray(message.externalIds)
+			? message.externalIds.map(String)
+			: [];
+		const source = typeof message.source === "string" ? message.source : "x";
+		const known = await filterKnownExternalIds(
+			String(message.serverUrl),
+			externalIds,
+			source,
+		);
+		if (known.length > 0) await saveLibraryCache(known);
+		return { known };
+	});
+	router.register("bp-hydrate-library-cache", async (message) => {
+		const serverUrl = String(message.serverUrl);
+		const cached = await loadLibraryCache();
+		const fetched = await fetchAllLibraryExternalIds(serverUrl);
+		if (fetched.length > 0) await saveLibraryCache(fetched);
+		const ids = await loadLibraryCache();
+		return { count: ids.size, cached: cached.size };
+	});
+	router.register("bp-reconcile-articles", async (message) => {
+		const removed = await reconcileArticleQueueWithServer(
+			String(message.serverUrl),
+		);
+		return { removed };
 	});
 }

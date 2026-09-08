@@ -1,0 +1,295 @@
+/* Floating history sync dock — sits above X's own FAB stack */
+
+.bp-sync-dock {
+  position: fixed;
+  right: 16px;
+  bottom: 88px;
+  z-index: 2147483645;
+  font-family:
+    TwitterChirp,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    Helvetica,
+    Arial,
+    sans-serif;
+  pointer-events: none;
+}
+
+.bp-sync-dock__fab,
+.bp-sync-dock__panel {
+  pointer-events: auto;
+}
+
+.bp-sync-dock__fab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  margin-left: auto;
+  padding: 0;
+  border: 1px solid rgb(47, 51, 54);
+  border-radius: 16px;
+  background-color: rgb(0, 0, 0);
+  color: rgb(231, 233, 234);
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+  transition:
+    background-color 0.15s ease,
+    box-shadow 0.15s ease,
+    transform 0.15s ease;
+}
+
+html[style*="color-scheme: light"] .bp-sync-dock__fab {
+  background-color: rgb(255, 255, 255);
+  border-color: rgb(207, 217, 222);
+  color: rgb(15, 20, 25);
+}
+
+.bp-sync-dock__fab:hover {
+  background-color: rgb(22, 24, 28);
+}
+
+html[style*="color-scheme: light"] .bp-sync-dock__fab:hover {
+  background-color: rgb(247, 249, 249);
+}
+
+.bp-sync-dock__fab--open {
+  background-color: rgb(29, 155, 240);
+  border-color: rgb(29, 155, 240);
+  color: rgb(255, 255, 255);
+  box-shadow: 0 0 0 4px rgba(29, 155, 240, 0.25);
+}
+
+.bp-sync-dock__fab svg {
+  width: 24px;
+  height: 24px;
+}
+
+.bp-sync-dock__panel {
+  position: absolute;
+  right: 0;
+  bottom: 64px;
+  width: min(300px, calc(100vw - 32px));
+  max-height: min(70vh, 420px);
+  overflow: auto;
+  border: 1px solid rgb(47, 51, 54);
+  border-radius: 16px;
+  background-color: rgb(22, 24, 28);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55);
+  opacity: 0;
+  transform: translateY(8px) scale(0.98);
+  transform-origin: bottom right;
+  visibility: hidden;
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease,
+    visibility 0.18s ease;
+}
+
+html[style*="color-scheme: light"] .bp-sync-dock__panel {
+  background-color: rgb(255, 255, 255);
+  border-color: rgb(207, 217, 222);
+}
+
+.bp-sync-dock__panel--open {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  visibility: visible;
+}
+
+.bp-sync-dock__header {
+  padding: 12px 14px 8px;
+}
+
+.bp-sync-dock__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 20px;
+  color: rgb(231, 233, 234);
+}
+
+html[style*="color-scheme: light"] .bp-sync-dock__title {
+  color: rgb(15, 20, 25);
+}
+
+.bp-sync-dock__status {
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  color: rgb(244, 63, 94);
+}
+
+.bp-sync-dock__status[hidden] {
+  display: none !important;
+}
+
+.bp-sync-dock__body {
+  padding: 0 14px 14px;
+}
+
+.bp-sync-dock__section-label {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 14px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgb(113, 118, 123);
+}
+
+.bp-sync-dock__today {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgb(47, 51, 54);
+}
+
+html[style*="color-scheme: light"] .bp-sync-dock__today {
+  border-color: rgb(239, 243, 244);
+}
+
+.bp-sync-dock__today-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  text-align: left;
+}
+
+.bp-sync-dock__today-item strong,
+.bp-sync-dock__metric-value {
+  display: block;
+  min-height: 20px;
+  font-size: 16px;
+  line-height: 20px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  color: rgb(231, 233, 234);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+html[style*="color-scheme: light"] .bp-sync-dock__today-item strong,
+html[style*="color-scheme: light"] .bp-sync-dock__metric-value {
+  color: rgb(15, 20, 25);
+}
+
+.bp-sync-dock__today-item span {
+  font-size: 11px;
+  line-height: 14px;
+  color: rgb(113, 118, 123);
+}
+
+.bp-sync-dock__metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.bp-sync-dock__metric {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  min-height: 44px;
+  text-align: left;
+}
+
+.bp-sync-dock__metric-label {
+  font-size: 11px;
+  line-height: 14px;
+  color: rgb(113, 118, 123);
+}
+
+.bp-sync-dock__metric-sub {
+  display: block;
+  min-height: 13px;
+  font-size: 10px;
+  line-height: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  color: rgb(113, 118, 123);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bp-sync-dock__metric-sub--empty {
+  visibility: hidden;
+}
+
+.bp-sync-dock__actions {
+  display: grid;
+  gap: 8px;
+}
+
+.bp-sync-dock__btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 38px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 9999px;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 20px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background-color 0.15s ease;
+}
+
+.bp-sync-dock__btn[hidden] {
+  display: none !important;
+}
+
+.bp-sync-dock__btn--secondary {
+  background-color: transparent;
+  color: rgb(231, 233, 234);
+  border: 1px solid rgb(83, 100, 113);
+}
+
+html[style*="color-scheme: light"] .bp-sync-dock__btn--secondary {
+  color: rgb(15, 20, 25);
+  border-color: rgb(207, 217, 222);
+}
+
+.bp-sync-dock__btn--active {
+  background-color: rgb(29, 155, 240);
+  color: rgb(255, 255, 255);
+  border: none;
+}
+
+.bp-sync-dock__btn--done {
+  background-color: rgba(0, 186, 124, 0.15);
+  color: rgb(0, 186, 124);
+  border: 1px solid rgba(0, 186, 124, 0.35);
+  cursor: default;
+}
+
+.bp-sync-dock__btn--retry {
+  border-color: rgb(244, 63, 94);
+  color: rgb(244, 63, 94);
+}
+
+.bp-sync-dock__hint {
+  margin: 9px 0 0;
+  font-size: 12px;
+  line-height: 16px;
+  text-align: center;
+  color: rgb(113, 118, 123);
+}

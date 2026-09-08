@@ -36,6 +36,7 @@ html[style*="color-scheme: light"] .bp-sidebar-card {
   justify-content: space-between;
   gap: 12px;
   padding: 12px 16px 10px;
+  min-height: 42px;
 }
 
 .bp-sidebar-card__title {
@@ -58,7 +59,8 @@ html[style*="color-scheme: light"] .bp-sidebar-card__title {
 
 .bp-sidebar-card__metrics {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
   margin: 0 0 12px;
   padding: 11px 0;
   border-top: 1px solid rgb(47, 51, 54);
@@ -72,8 +74,25 @@ html[style*="color-scheme: light"] .bp-sidebar-card__metrics {
 .bp-sidebar-card__metric {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 1px;
   min-width: 0;
+  min-height: 50px;
+  text-align: left;
+}
+
+.bp-sidebar-card__metric-value {
+  display: block;
+  min-height: 20px;
+  font-size: 16px;
+  line-height: 20px;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  color: rgb(231, 233, 234);
+  font-weight: 800;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .bp-sidebar-card__metric + .bp-sidebar-card__metric {
@@ -85,12 +104,12 @@ html[style*="color-scheme: light"] .bp-sidebar-card__metric + .bp-sidebar-card__
   border-color: rgb(239, 243, 244);
 }
 
-.bp-sidebar-card__metric strong {
-  font-size: 20px;
-  line-height: 24px;
-  font-variant-numeric: tabular-nums;
-  color: rgb(231, 233, 234);
-  font-weight: 800;
+.bp-sidebar-card__metric-label {
+  display: block;
+  min-height: 16px;
+  font-size: 12px;
+  line-height: 16px;
+  color: rgb(113, 118, 123);
 }
 
 .bp-sidebar-card__metric span {
@@ -99,12 +118,38 @@ html[style*="color-scheme: light"] .bp-sidebar-card__metric + .bp-sidebar-card__
   color: rgb(113, 118, 123);
 }
 
-html[style*="color-scheme: light"] .bp-sidebar-card__metric strong {
+.bp-sidebar-card__metric-sub {
+  display: block;
+  min-height: 14px;
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 14px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  color: rgb(113, 118, 123);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bp-sidebar-card__metric-sub--empty {
+  visibility: hidden;
+}
+
+html[style*="color-scheme: light"] .bp-sidebar-card__metric-sub {
+  color: rgb(83, 100, 113);
+}
+
+html[style*="color-scheme: light"] .bp-sidebar-card__metric strong,
+html[style*="color-scheme: light"] .bp-sidebar-card__metric-value {
   color: rgb(15, 20, 25);
 }
 
 .bp-sidebar-card__sync {
+  flex: 0 1 52%;
   min-width: 0;
+  min-height: 16px;
   margin: 0;
   overflow: hidden;
   font-size: 12px;
@@ -113,6 +158,8 @@ html[style*="color-scheme: light"] .bp-sidebar-card__metric strong {
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
   color: rgb(113, 118, 123);
 }
 

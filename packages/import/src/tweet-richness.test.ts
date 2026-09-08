@@ -70,3 +70,8 @@ test("treats substantially longer text as richer", () => {
 	};
 	assert.equal(isRicherTweetPayload(long, short), true);
 });
+
+test("does not treat incoming as richer when there is no existing payload", () => {
+	assert.equal(isRicherTweetPayload(stub, undefined), false);
+	assert.equal(isRicherTweetPayload(stub, null), false);
+});

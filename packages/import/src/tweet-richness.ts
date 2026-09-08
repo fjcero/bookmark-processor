@@ -101,6 +101,7 @@ export function tweetPayloadScore(tweet: unknown): number {
 
 /** True when `incoming` should replace `existing` raw tweet JSON. */
 export function isRicherTweetPayload(incoming: unknown, existing: unknown): boolean {
+	if (existing == null) return false;
 	// INVARIANT: never replace a row that has `_articleRaw` with one that doesn't.
 	if (articleRawFrom(existing) != null && articleRawFrom(incoming) == null) {
 		return false;

@@ -93,7 +93,7 @@ toggleBtn.addEventListener("click", async () => {
 			? `Capture enabled (${response.count ?? 0} tweets)`
 			: "Capture disabled";
 	} catch {
-		statusEl.textContent = "Cannot reach page — reload x.com tab first";
+		statusEl.textContent = "Cannot reach page. Reload the x.com tab first.";
 	}
 });
 

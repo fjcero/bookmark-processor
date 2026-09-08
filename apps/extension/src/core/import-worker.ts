@@ -20,6 +20,7 @@ import {
 } from "./idb";
 import { allTabUrlPatterns } from "./platform";
 import { loadSettings } from "./storage";
+import { loadLibraryCache } from "./library-cache";
 
 const LEGACY_IMPORT_QUEUE_KEY = "bp-import-worker";
 const IMPORT_META_KEY = "bp-import-worker-meta";
@@ -141,9 +142,18 @@ export async function enqueueImportPayload(
 	const resolvedUrl = await resolveServerUrl(serverUrl);
 	const state = await loadImportWorkerState();
 	const queued = new Set(state.queue.map((entry) => entry.externalId));
+	const synced = await loadSyncedExternalIds();
+	const library = await loadLibraryCache();
 	const added: ImportWorkerEntry[] = [];
 	for (const [externalId, tweet] of Object.entries(payload.tweets)) {
-		if (queued.has(externalId) || !isImportableTweet(tweet)) continue;
+		if (
+			queued.has(externalId) ||
+			synced.has(externalId) ||
+			library.has(externalId) ||
+			!isImportableTweet(tweet)
+		) {
+			continue;
+		}
 		const entry: ImportWorkerEntry = {
 			externalId,
 			payload: singleTweetPayload(payload, externalId, tweet),
@@ -165,14 +175,27 @@ export async function enqueueImportPayload(
 async function removeFromCapture(externalIds: string[]): Promise<void> {
 	if (externalIds.length === 0) return;
 	const capture = await idbGet<CaptureState>(CAPTURE_KEY);
-	if (!capture?.tweets) return;
+	if (!capture) return;
 	let changed = false;
+	const synced = new Set(capture.synced ?? []);
 	for (const externalId of externalIds) {
-		if (!(externalId in capture.tweets)) continue;
-		delete capture.tweets[externalId];
-		changed = true;
+		if (capture.tweets && externalId in capture.tweets) {
+			delete capture.tweets[externalId];
+			changed = true;
+		}
+		if (!synced.has(externalId)) {
+			synced.add(externalId);
+			changed = true;
+		}
 	}
-	if (changed) await idbSet(CAPTURE_KEY, capture);
+	if (!changed) return;
+	capture.synced = [...synced];
+	await idbSet(CAPTURE_KEY, capture);
+}
+
+async function loadSyncedExternalIds(): Promise<Set<string>> {
+	const capture = await idbGet<CaptureState>(CAPTURE_KEY);
+	return new Set(capture?.synced ?? []);
 }
 
 function notifyProgress(progress: ImportWorkerProgress): void {

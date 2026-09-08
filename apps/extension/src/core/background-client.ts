@@ -68,6 +68,58 @@ export async function fetchLibraryStatsInBackground(
 	}
 }
 
+export async function filterKnownExternalIdsInBackground(
+	serverUrl: string,
+	externalIds: string[],
+	source = "x",
+): Promise<string[]> {
+	if (externalIds.length === 0) return [];
+	try {
+		const result = await request<{ known: string[] }>({
+			type: "bp-filter-known",
+			serverUrl,
+			externalIds,
+			source,
+		});
+		return Array.isArray(result.known) ? result.known : [];
+	} catch {
+		return [];
+	}
+}
+
+export async function hydrateLibraryCacheInBackground(
+	serverUrl: string,
+): Promise<{ count: number }> {
+	return await request<{ count: number }>({
+		type: "bp-hydrate-library-cache",
+		serverUrl,
+	});
+}
+
+export async function fetchTodayStatsInBackground(
+	serverUrl: string,
+): Promise<import("@repo/import/capture/engine").TodayImportStats | null> {
+	try {
+		return await request<import("@repo/import/capture/engine").TodayImportStats>(
+			{
+				type: "bp-fetch-today",
+				serverUrl,
+			},
+		);
+	} catch {
+		return null;
+	}
+}
+
+export async function reconcileArticlesInBackground(
+	serverUrl: string,
+): Promise<{ removed: number }> {
+	return await request<{ removed: number }>({
+		type: "bp-reconcile-articles",
+		serverUrl,
+	});
+}
+
 /** @deprecated Use fetchLibraryStatsInBackground */
 export async function fetchTotalInBackground(
 	serverUrl: string,

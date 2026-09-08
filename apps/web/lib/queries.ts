@@ -672,6 +672,101 @@ export async function archiveItem(id: string): Promise<boolean> {
 	return true;
 }
 
+/** Which of these tweet IDs already exist in the library (non-archived). */
+export async function filterKnownExternalIds(
+	source: string,
+	externalIds: string[],
+): Promise<string[]> {
+	if (externalIds.length === 0) return [];
+	const rows = await db
+		.select({ externalId: items.externalId })
+		.from(items)
+		.where(
+			and(
+				eq(items.source, source),
+				inArray(items.externalId, externalIds),
+				isNull(items.archivedAt),
+			),
+		);
+	return rows.map((row) => row.externalId);
+}
+
+/** Paginated library IDs for extension cache warm-up before capture. */
+export async function listLibraryExternalIds(
+	source: string,
+	offset: number,
+	limit: number,
+): Promise<string[]> {
+	const rows = await db
+		.select({ externalId: items.externalId })
+		.from(items)
+		.where(and(eq(items.source, source), isNull(items.archivedAt)))
+		.orderBy(items.id)
+		.limit(limit)
+		.offset(offset);
+	return rows.map((row) => row.externalId);
+}
+
+/** Tweet IDs whose article bodies are still missing from item_raw. */
+export async function listPendingArticleTweetIds(): Promise<string[]> {
+	const rows = await db
+		.select({
+			externalId: items.externalId,
+			rawJson: itemRaw.payload,
+			contentType: items.contentType,
+		})
+		.from(items)
+		.leftJoin(
+			itemRaw,
+			and(
+				eq(itemRaw.source, items.source),
+				eq(itemRaw.externalId, items.externalId),
+			),
+		)
+		.where(
+			and(
+				listedForKind("all"),
+				eq(items.contentType, "article"),
+				isNull(items.captureUnavailableAt),
+			),
+		);
+
+	const pending: string[] = [];
+	for (const row of rows) {
+		if (isPendingArticleRaw(row.rawJson ?? "", row.contentType)) {
+			pending.push(row.externalId);
+		}
+	}
+	return pending;
+}
+
+export async function getTodayImportStats(): Promise<{
+	importedToday: number;
+	postsToday: number;
+	articlesToday: number;
+}> {
+	const start = new Date();
+	start.setHours(0, 0, 0, 0);
+	const rows = await db
+		.select({
+			contentType: items.contentType,
+			n: count(),
+		})
+		.from(items)
+		.where(and(notArchived, gte(items.importedAt, start)))
+		.groupBy(items.contentType);
+
+	let importedToday = 0;
+	let postsToday = 0;
+	let articlesToday = 0;
+	for (const row of rows) {
+		importedToday += row.n;
+		if (row.contentType === "article") articlesToday += row.n;
+		else postsToday += row.n;
+	}
+	return { importedToday, postsToday, articlesToday };
+}
+
 export async function archiveItemByExternalId(
 	source: string,
 	externalId: string,

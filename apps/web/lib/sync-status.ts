@@ -1,8 +1,9 @@
-import { and, count, eq, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, count, eq, isNotNull, isNull } from "drizzle-orm";
 import { db, itemRaw, items, settings } from "@repo/db";
 import {
 	articleRestId,
 	articleResultFromTweet,
+	isPendingArticleRaw,
 	type ExtensionStatusReport,
 	type LibrarySyncQueue,
 	type SyncRevocation,
@@ -47,8 +48,11 @@ function parseRevocations(raw: string | undefined): SyncRevocation[] {
 }
 
 export async function getLibrarySyncQueue(): Promise<LibrarySyncQueue> {
-	const [needingBody] = await db
-		.select({ n: count() })
+	const articleRows = await db
+		.select({
+			rawJson: itemRaw.payload,
+			contentType: items.contentType,
+		})
 		.from(items)
 		.leftJoin(
 			itemRaw,
@@ -62,12 +66,16 @@ export async function getLibrarySyncQueue(): Promise<LibrarySyncQueue> {
 				listedForKind("all"),
 				eq(items.contentType, "article"),
 				isNull(items.captureUnavailableAt),
-				sql`(
-          json_extract(${itemRaw.payload}, '$.article.article_results.result.content_state.blocks[0].text') IS NULL
-          AND json_extract(${itemRaw.payload}, '$._articleRaw') IS NULL
-        )`,
 			),
 		);
+
+	let articlesNeedingBody = 0;
+	for (const row of articleRows) {
+		if (isPendingArticleRaw(row.rawJson ?? "", row.contentType)) {
+			articlesNeedingBody += 1;
+		}
+	}
+
 	const [refetchQueued] = await db
 		.select({ n: count() })
 		.from(items)
@@ -78,7 +86,7 @@ export async function getLibrarySyncQueue(): Promise<LibrarySyncQueue> {
 		.where(and(listedForKind("all"), isNotNull(items.captureUnavailableAt)));
 
 	return {
-		articlesNeedingBody: needingBody?.n ?? 0,
+		articlesNeedingBody,
 		articlesRefetchQueued: refetchQueued?.n ?? 0,
 		captureUnavailable: unavailable?.n ?? 0,
 		importQueue: await getImportQueueCounts(),

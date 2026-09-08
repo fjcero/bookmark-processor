@@ -18,7 +18,15 @@ import {
 	createBackgroundStorageAdapter,
 	enqueueImportsInBackground,
 	fetchLibraryStatsInBackground,
+	filterKnownExternalIdsInBackground,
+	hydrateLibraryCacheInBackground,
+	reconcileArticlesInBackground,
 } from "./core/background-client";
+import {
+	isLibraryCached,
+	loadLibraryCache,
+	saveLibraryCache,
+} from "./core/library-cache";
 import { loadSettings } from "./core/storage";
 import {
 	mountSidebarUiWithRetry,
@@ -32,6 +40,17 @@ import {
 	updateLibraryStats,
 	updateSessionStats,
 } from "./sidebar-ui";
+import {
+	mountSyncDock,
+	setDockArticleQueue,
+	setDockAutoScrollUi,
+	setDockSyncRetryVisible,
+	setDockSyncStatus,
+	type SyncDockRefs,
+	unmountSyncDock,
+	updateDockLibraryStats,
+	updateDockSessionStats,
+} from "./sync-dock-ui";
 import { clickTimelineRetry } from "./timeline-recovery";
 
 const SYNC_INTERVAL_MS = 1500;
@@ -79,6 +98,7 @@ async function isCapturePage(): Promise<boolean> {
 
 let engine: CaptureEngine | null = null;
 let sidebar: SidebarUiRefs | null = null;
+let syncDock: SyncDockRefs | null = null;
 let autoScrolling = false;
 let uiMounted = false;
 let stopSidebarRetry: (() => void) | null = null;
@@ -88,7 +108,9 @@ let syncQueued = false;
 let retryObserver: MutationObserver | null = null;
 let sessionImported = 0;
 let sessionSkipped = 0;
-let libraryArticlesMissing: number | null = null;
+const sessionAlreadyHadIds = new Set<string>();
+let knownCheckTimer: ReturnType<typeof setTimeout> | null = null;
+const pendingKnownCheck = new Set<string>();
 let libraryStats: {
 	posts: number | null;
 	articles: number | null;
@@ -103,6 +125,10 @@ function reportCaptureScroll(active: boolean): void {
 	}
 }
 
+function hasCaptureUi(): boolean {
+	return Boolean(sidebar || syncDock);
+}
+
 function applyArticleStats(stats: {
 	pending: number;
 	fetching: number;
@@ -110,18 +136,32 @@ function applyArticleStats(stats: {
 	failed: number;
 	total: number;
 }): void {
-	if (!sidebar) return;
-	setArticleStatus(sidebar, stats, libraryArticlesMissing);
+	const remaining = stats.pending + stats.fetching;
+	if (sidebar) setArticleStatus(sidebar, stats);
+	if (syncDock) setDockArticleQueue(syncDock, remaining);
 }
 
 function renderSessionProgress(): void {
-	if (!sidebar) return;
-	const pending = engine?.tweetCount() ?? 0;
-	updateSessionStats(sidebar, {
+	if (!engine) return;
+	const pending = engine.tweetCount();
+	const sidebarStats = {
 		new: sessionImported,
-		skipped: sessionSkipped,
+		skipped: sessionAlreadyHadIds.size + sessionSkipped,
 		pending,
-	});
+	};
+	if (sidebar) updateSessionStats(sidebar, sidebarStats);
+	if (syncDock) {
+		updateDockSessionStats(syncDock, {
+			seen: engine.observedCount(),
+			new: sessionImported,
+			pending,
+		});
+	}
+}
+
+function noteAlreadyInLibrary(tweetId: string): void {
+	sessionAlreadyHadIds.add(tweetId);
+	renderSessionProgress();
 }
 
 function applyLibraryStats(partial: {
@@ -133,6 +173,25 @@ function applyLibraryStats(partial: {
 	if (partial.articles != null) libraryStats.articles = partial.articles;
 	if (partial.total != null) libraryStats.total = partial.total;
 	if (sidebar) updateLibraryStats(sidebar, libraryStats);
+	if (syncDock) updateDockLibraryStats(syncDock, libraryStats);
+}
+
+function setCaptureAutoScroll(
+	state: "idle" | "running" | "done",
+	count?: number,
+): void {
+	if (sidebar) setAutoScrollUi(sidebar, state, count);
+	if (syncDock) setDockAutoScrollUi(syncDock, state, count);
+}
+
+function setCaptureSyncStatus(message: string): void {
+	if (sidebar) setSyncStatus(sidebar, message);
+	if (syncDock) setDockSyncStatus(syncDock, message);
+}
+
+function setCaptureSyncRetryVisible(visible: boolean): void {
+	if (sidebar) setSyncRetryVisible(sidebar, visible);
+	if (syncDock) setDockSyncRetryVisible(syncDock, visible);
 }
 
 function trackPendingCount(count: number): void {
@@ -140,6 +199,9 @@ function trackPendingCount(count: number): void {
 }
 
 function applyImportProgress(progress: ImportWorkerProgress): void {
+	if (progress.completedIds?.length) {
+		void saveLibraryCache(progress.completedIds);
+	}
 	if (progress.completedIds?.length && engine) {
 		engine.removeSynced(progress.completedIds);
 		clearCaptureQueue();
@@ -152,14 +214,14 @@ function applyImportProgress(progress: ImportWorkerProgress): void {
 		articles: progress.libraryArticles,
 	});
 	renderSessionProgress();
-	if (!sidebar) return;
+	if (!hasCaptureUi()) return;
 
 	if (progress.lastError) {
-		setSyncRetryVisible(sidebar, true);
-		setSyncStatus(sidebar, "Background import paused — retrying");
+		setCaptureSyncRetryVisible(true);
+		setCaptureSyncStatus("Background import paused, retrying");
 		return;
 	}
-	setSyncRetryVisible(sidebar, false);
+	setCaptureSyncRetryVisible(false);
 }
 
 function enqueueCapturedArticles(): void {
@@ -168,6 +230,7 @@ function enqueueCapturedArticles(): void {
 	const articles: Array<{ tweetId: string; articleId: string; url: string }> =
 		[];
 	for (const [tweetId, tweet] of Object.entries(payload.tweets)) {
+		if (engine.isSynced(tweetId) || isLibraryCached(tweetId)) continue;
 		const pending = pendingArticleFromRaw(tweetId, JSON.stringify(tweet), null);
 		if (pending) articles.push(pending);
 	}
@@ -176,6 +239,51 @@ function enqueueCapturedArticles(): void {
 		void chrome.runtime.sendMessage({ type: "bp-enqueue-articles", articles });
 	} catch {
 		/* background unavailable */
+	}
+}
+
+async function flushKnownCheck(): Promise<void> {
+	knownCheckTimer = null;
+	if (!engine || pendingKnownCheck.size === 0) return;
+	const ids = [...pendingKnownCheck];
+	pendingKnownCheck.clear();
+	const settings = await loadSettings();
+	if (settings.mode !== "api" || !settings.serverUrl) return;
+	const known = await filterKnownExternalIdsInBackground(
+		settings.serverUrl,
+		ids,
+	);
+	if (known.length > 0) {
+		await saveLibraryCache(known);
+		engine.markSynced(known);
+		for (const id of known) sessionAlreadyHadIds.add(id);
+		renderSessionProgress();
+	}
+}
+
+function queueKnownCheck(tweetId: string): void {
+	if (!engine || engine.isSynced(tweetId) || isLibraryCached(tweetId)) return;
+	pendingKnownCheck.add(tweetId);
+	if (knownCheckTimer) clearTimeout(knownCheckTimer);
+	knownCheckTimer = setTimeout(() => {
+		void flushKnownCheck();
+	}, 400);
+}
+
+async function prepareCaptureSession(engine: CaptureEngine): Promise<void> {
+	await loadLibraryCache();
+	const settings = await loadSettings();
+	if (settings.mode !== "api" || !settings.serverUrl) return;
+	try {
+		await hydrateLibraryCacheInBackground(settings.serverUrl);
+		engine.markSynced([...(await loadLibraryCache())]);
+		await reconcileArticlesInBackground(settings.serverUrl);
+		void refreshArticleStats();
+	} catch (err) {
+		console.warn(
+			"[Bookmark Processor] Library cache warm-up failed:",
+			err instanceof Error ? err.message : err,
+		);
 	}
 }
 
@@ -326,23 +434,26 @@ function watchArticleHtml(
 }
 
 async function refreshLibraryStats(): Promise<void> {
-	if (!sidebar) return;
+	if (!hasCaptureUi()) return;
 	const settings = await loadSettings();
 	if (settings.mode !== "api" || !settings.serverUrl) {
 		libraryStats = { posts: null, articles: null, total: null };
-		updateLibraryStats(sidebar, null);
+		if (sidebar) updateLibraryStats(sidebar, null);
+		if (syncDock) updateDockLibraryStats(syncDock, null);
 		return;
 	}
 	try {
 		const stats = await fetchLibraryStatsInBackground(settings.serverUrl);
-		if (!sidebar) return;
+		if (!hasCaptureUi()) return;
 		if (!stats) {
-			updateLibraryStats(sidebar, null);
+			if (sidebar) updateLibraryStats(sidebar, null);
+			if (syncDock) updateDockLibraryStats(syncDock, null);
 			return;
 		}
 		applyLibraryStats(stats);
 	} catch {
 		if (sidebar) updateLibraryStats(sidebar, null);
+		if (syncDock) updateDockLibraryStats(syncDock, null);
 	}
 }
 
@@ -401,7 +512,7 @@ async function recoverTimeline(): Promise<boolean> {
 }
 
 async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
-	if (!engine || !sidebar) return;
+	if (!engine || !hasCaptureUi()) return;
 	let workerPaused = false;
 	if (syncing) {
 		syncQueued = true;
@@ -414,18 +525,38 @@ async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
 		.filter(([, tweet]) => !isImportableTweet(tweet))
 		.map(([id]) => id);
 	if (shellIds.length > 0) {
-		engine.removeSynced(shellIds);
+		engine.discard(shellIds);
 	}
-	const importableTweets = Object.fromEntries(
+	let importableTweets = Object.fromEntries(
 		tweetEntries.filter(([, tweet]) => isImportableTweet(tweet)),
 	);
-	const pendingCount = Object.keys(importableTweets).length;
-	if (pendingCount === 0) {
-		if (opts.manual) showToast("Nothing to sync yet — scroll first");
-		return;
-	}
 
 	const settings = await loadSettings();
+
+	if (settings.mode === "api" && settings.serverUrl) {
+		try {
+			const known = await filterKnownExternalIdsInBackground(
+				settings.serverUrl,
+				Object.keys(importableTweets),
+			);
+			if (known.length > 0) {
+				for (const id of known) sessionAlreadyHadIds.add(id);
+				engine.markSynced(known);
+				importableTweets = Object.fromEntries(
+					Object.entries(importableTweets).filter(([id]) => !known.includes(id)),
+				);
+				renderSessionProgress();
+			}
+		} catch {
+			/* offline — rely on local synced cache */
+		}
+	}
+
+	const pendingCount = Object.keys(importableTweets).length;
+	if (pendingCount === 0) {
+		if (opts.manual) showToast("Nothing to sync yet. Scroll first.");
+		return;
+	}
 
 	if (settings.mode === "download") {
 		downloadPayload({ ...pendingPayload, tweets: importableTweets });
@@ -434,7 +565,7 @@ async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
 		await engine.reset();
 		autoScrolling = false;
 		renderSessionProgress();
-		setAutoScrollUi(sidebar, "idle");
+		setCaptureAutoScroll("idle");
 		return;
 	}
 
@@ -445,7 +576,7 @@ async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
 
 	clearSyncTimer();
 	syncing = true;
-	setSyncRetryVisible(sidebar, false);
+	setCaptureSyncRetryVisible(false);
 
 	try {
 		const progress = await enqueueImportsInBackground(
@@ -460,8 +591,8 @@ async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
 	} catch (err) {
 		workerPaused = true;
 		const msg = err instanceof Error ? err.message : "Sync failed";
-		setSyncStatus(sidebar, "Sync failed — click Retry or wait");
-		setSyncRetryVisible(sidebar, true);
+		setCaptureSyncStatus("Sync failed. Click Retry or wait.");
+		setCaptureSyncRetryVisible(true);
 		if (opts.manual || !opts.auto) showToast(msg);
 		if (settings.autoSync && engine.tweetCount() > 0) {
 			clearSyncTimer();
@@ -480,31 +611,31 @@ async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
 }
 
 function handleAutoScroll(): void {
-	if (!engine || !sidebar) return;
+	if (!engine || !hasCaptureUi()) return;
 	if (autoScrolling) {
 		autoScrolling = false;
 		stopRetryWatcher();
-		setAutoScrollUi(sidebar, "idle");
+		setCaptureAutoScroll("idle");
 		reportCaptureScroll(false);
 		return;
 	}
 	autoScrolling = true;
 	reportCaptureScroll(true);
 	startRetryWatcher();
-	setAutoScrollUi(sidebar, "running");
+	setCaptureAutoScroll("running");
 	void (async () => {
 		const settings = await loadSettings();
-		if (!engine || !sidebar) return;
+		if (!engine || !hasCaptureUi()) return;
 		await runAutoScroll(
 			engine,
 			(_count, done) => {
-				if (!sidebar || !engine) return;
+				if (!engine || !hasCaptureUi()) return;
 				renderSessionProgress();
 				if (done) {
 					autoScrolling = false;
 					reportCaptureScroll(false);
 					stopRetryWatcher();
-					setAutoScrollUi(sidebar, "done", engine.observedCount());
+					setCaptureAutoScroll("done", engine.observedCount());
 					void performSync({ auto: true });
 				}
 			},
@@ -529,16 +660,34 @@ async function refreshArticleStats(): Promise<void> {
 	}
 }
 
-function mountUi(): void {
+function mountCaptureUi(): void {
 	if (uiMounted || !engine) return;
 
-	const label = engine.label;
+	const handlers = {
+		onSyncRetry: () => void performSync({ manual: true }),
+		onAutoScroll: handleAutoScroll,
+	};
 
+	if (isHistoryPage()) {
+		syncDock = mountSyncDock({
+			...handlers,
+			onPanelOpen: () => {
+				renderSessionProgress();
+				void refreshLibraryStats();
+			},
+		});
+		uiMounted = true;
+		renderSessionProgress();
+		void refreshLibraryStats();
+		void refreshArticleStats();
+		return;
+	}
+
+	const label = engine.label;
 	stopSidebarRetry = mountSidebarUiWithRetry(
 		{
 			label,
-			onSyncRetry: () => void performSync({ manual: true }),
-			onAutoScroll: handleAutoScroll,
+			...handlers,
 		},
 		(refs) => {
 			sidebar = refs;
@@ -550,6 +699,10 @@ function mountUi(): void {
 	);
 }
 
+function mountUi(): void {
+	mountCaptureUi();
+}
+
 async function startCapture(): Promise<void> {
 	if (!(await isCapturePage())) return;
 	if (engine) {
@@ -559,8 +712,11 @@ async function startCapture(): Promise<void> {
 	engine = new CaptureEngine({
 		storage: createBackgroundStorageAdapter(),
 		storeResponses: false,
-		onTweetObserved: () => {
+		isLibraryCached,
+		onAlreadyInLibrary: noteAlreadyInLibrary,
+		onTweetObserved: (tweetId) => {
 			renderSessionProgress();
+			queueKnownCheck(tweetId);
 		},
 		onCountChange: (count) => {
 			trackPendingCount(count);
@@ -573,6 +729,7 @@ async function startCapture(): Promise<void> {
 
 	try {
 		const restored = await engine.restore();
+		await prepareCaptureSession(engine);
 		engine.start();
 		mountUi();
 		if (restored && engine.tweetCount() > 0) {
@@ -582,6 +739,7 @@ async function startCapture(): Promise<void> {
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		console.warn("[Bookmark Processor] Capture start failed:", msg);
+		await prepareCaptureSession(engine);
 		engine.start();
 		mountUi();
 	}
@@ -590,13 +748,20 @@ async function startCapture(): Promise<void> {
 async function stopCapture(): Promise<void> {
 	if (!engine) return;
 	clearSyncTimer();
+	if (knownCheckTimer) {
+		clearTimeout(knownCheckTimer);
+		knownCheckTimer = null;
+	}
+	pendingKnownCheck.clear();
 	stopRetryWatcher();
 	engine.stop();
 	stopSidebarRetry?.();
 	stopSidebarRetry = null;
 	unmountSidebarUi();
+	unmountSyncDock();
 	uiMounted = false;
 	sidebar = null;
+	syncDock = null;
 	engine = null;
 	autoScrolling = false;
 	reportCaptureScroll(false);
@@ -604,7 +769,7 @@ async function stopCapture(): Promise<void> {
 	syncQueued = false;
 	sessionImported = 0;
 	sessionSkipped = 0;
-	libraryArticlesMissing = null;
+	sessionAlreadyHadIds.clear();
 	showToast("Capture stopped");
 }
 
@@ -667,11 +832,6 @@ function registerMessageListener(): void {
 				if (message.stats) applyArticleStats(message.stats);
 				return false;
 			}
-			if (message?.type === "bp-library-article-count") {
-				libraryArticlesMissing = Number(message.count);
-				void refreshArticleStats();
-				return false;
-			}
 			if (message?.type === "bp-import-progress") {
 				if (message.progress) applyImportProgress(message.progress);
 				return false;
@@ -706,7 +866,7 @@ async function boot(): Promise<void> {
 	try {
 		if (!hasExtensionContext()) {
 			console.warn(
-				"[Bookmark Processor] Extension context unavailable — refresh this tab after reloading the extension.",
+				"[Bookmark Processor] Extension context unavailable. Refresh this tab after reloading the extension.",
 			);
 			return;
 		}

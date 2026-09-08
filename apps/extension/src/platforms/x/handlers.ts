@@ -11,6 +11,7 @@ import {
 import type { CaptureEventDetail } from "@repo/import/capture/hooks-events";
 import type { MessageRouter } from "../../core/platform";
 import { idbGet, idbSet } from "../../core/idb";
+import { loadLibraryCache } from "../../core/library-cache";
 import {
 	loadArticleQueue,
 	loadHydrationState,
@@ -34,7 +35,15 @@ import {
 
 export function registerXMessageHandlers(router: MessageRouter): void {
 	router.register("bp-enqueue-articles", async (message) => {
-		const incoming = Array.isArray(message.articles) ? message.articles : [];
+		const library = await loadLibraryCache();
+		const incoming = (Array.isArray(message.articles) ? message.articles : []).filter(
+			(entry) =>
+				entry &&
+				typeof entry === "object" &&
+				typeof (entry as { tweetId?: string }).tweetId === "string" &&
+				!library.has((entry as { tweetId: string }).tweetId),
+		);
+		if (incoming.length === 0) return { ok: true, skipped: true };
 		await updateArticleQueue((queue) => enqueueArticles(queue, incoming));
 		await broadcastStats();
 		await scheduleNext();

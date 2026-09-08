@@ -124,10 +124,8 @@ export function enqueueArticles(
       }
       if (existing.status === "fetching") continue
       if (existing.status === "ok") {
-        existing.status = "pending"
-        existing.attempts = 0
-        existing.lastError = undefined
-        existing.nextAt = now + ARTICLE_REQUEUE_OK_MS
+        if (next.refetch) resetQueueItem(existing)
+        continue
       }
       continue
     }
@@ -177,12 +175,7 @@ export function markArticleSuccess(
   queue: ArticleQueueItem[],
   articleId: string,
 ): ArticleQueueItem[] {
-  const item = queue.find((entry) => entry.articleId === articleId)
-  if (!item) return queue
-  item.status = "ok"
-  item.lastError = undefined
-  item.nextAt = undefined
-  return queue
+  return markArticleRemoved(queue, articleId)
 }
 
 export function markArticleFailure(
@@ -256,7 +249,13 @@ export function articleQueueStats(queue: ArticleQueueItem[]): {
   total: number
 } {
   const stats = { pending: 0, fetching: 0, ok: 0, failed: 0, total: queue.length }
+  const now = Date.now()
   for (const item of queue) {
+    if (item.status === "pending") {
+      if (item.nextAt != null && item.nextAt > now) continue
+      stats.pending++
+      continue
+    }
     stats[item.status]++
   }
   return stats

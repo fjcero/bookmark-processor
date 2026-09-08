@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Bookmark Processor Capture",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Capture X bookmarks, likes, and your replies, then download JSON or send to Bookmark Processor.",
   "permissions": ["storage", "unlimitedStorage", "activeTab", "alarms", "tabs"],
   "host_permissions": [
@@ -27,7 +27,7 @@
     {
       "matches": ["https://x.com/*", "https://twitter.com/*"],
       "js": ["content.js"],
-      "css": ["sidebar.css"],
+      "css": ["sidebar.css", "sync-dock.css"],
       "run_at": "document_idle"
     }
   ]

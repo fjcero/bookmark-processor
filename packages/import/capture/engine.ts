@@ -38,6 +38,8 @@ export interface CaptureState {
 	tweets: Record<string, unknown>;
 	responses: CaptureResponse[];
 	seen: string[];
+	/** Tweet rest_ids already handled by the server (imported or skipped). */
+	synced?: string[];
 	startedAt: string;
 	pageUrl: string;
 }
@@ -55,9 +57,13 @@ export interface CaptureEngineOptions {
 	onArticleBody?: (article: GraphQLArticleResult, raw: unknown) => void;
 	onCapture?: (detail: CaptureEventDetail) => void;
 	onTweetObserved?: (tweetId: string) => void;
+	/** Tweet was seen but already exists in the warmed library cache. */
+	onAlreadyInLibrary?: (tweetId: string) => void;
 	persistDebounceMs?: number;
 	/** Extension: skip storing raw API responses (saves chrome.storage quota). */
 	storeResponses?: boolean;
+	/** Extension: skip tweets already present in the warmed library cache. */
+	isLibraryCached?: (id: string) => boolean;
 }
 
 export interface ExportPayload {
@@ -98,16 +104,19 @@ export class CaptureEngine {
 	private tweets: Record<string, unknown>;
 	private responses: CaptureResponse[];
 	private seen: Set<string>;
+	private synced: Set<string>;
 	private readonly storage?: CaptureStorage;
 	private readonly onCountChange?: (count: number) => void;
 	private readonly onToast?: (message: string, color?: string) => void;
 	private readonly onArticleBody?: (article: GraphQLArticleResult, raw: unknown) => void;
 	private readonly onCapture?: (detail: CaptureEventDetail) => void;
 	private readonly onTweetObserved?: (tweetId: string) => void;
+	private readonly onAlreadyInLibrary?: (tweetId: string) => void;
 	private readonly observedTweets: Set<string>;
 	private persistTimer: ReturnType<typeof setTimeout> | null;
 	private readonly persistDebounceMs: number;
 	private readonly storeResponses: boolean;
+	private readonly isLibraryCached?: (id: string) => boolean;
 	private startedAt: string;
 	private pageListener: ((e: Event) => void) | null;
 	private active: boolean;
@@ -116,6 +125,7 @@ export class CaptureEngine {
 		this.tweets = {};
 		this.responses = [];
 		this.seen = new Set();
+		this.synced = new Set();
 		this.observedTweets = new Set();
 		this.persistTimer = null;
 		this.startedAt = new Date().toISOString();
@@ -129,12 +139,23 @@ export class CaptureEngine {
 		this.onArticleBody = options.onArticleBody;
 		this.onCapture = options.onCapture;
 		this.onTweetObserved = options.onTweetObserved;
+		this.onAlreadyInLibrary = options.onAlreadyInLibrary;
 		this.persistDebounceMs = options.persistDebounceMs ?? 500;
 		this.storeResponses = options.storeResponses ?? true;
+		this.isLibraryCached = options.isLibraryCached;
 	}
 
 	tweetCount(): number {
 		return Object.keys(this.tweets).length;
+	}
+
+	/** True when this tweet was already imported or skipped on the server. */
+	isSynced(id: string): boolean {
+		return this.synced.has(id);
+	}
+
+	syncedCount(): number {
+		return this.synced.size;
 	}
 
 	/** Tweets observed this page session, including ones already uploaded. */
@@ -153,6 +174,7 @@ export class CaptureEngine {
 		this.tweets = saved.tweets;
 		this.responses = saved.responses ?? [];
 		this.seen = new Set(saved.seen ?? Object.keys(saved.tweets));
+		this.synced = new Set(saved.synced ?? []);
 		this.startedAt = saved.startedAt ?? this.startedAt;
 		this.onCountChange?.(this.tweetCount());
 		return this.tweetCount() > 0;
@@ -206,8 +228,8 @@ export class CaptureEngine {
 		await this.storage?.clear();
 	}
 
-	/** Remove tweets that were included in a successful upload. */
-	removeSynced(ids: string[]): void {
+	/** Drop captured tweets without marking them as synced (e.g. empty shells). */
+	discard(ids: string[]): void {
 		if (ids.length === 0) return;
 		this.clearPersistTimer();
 		for (const id of ids) {
@@ -217,12 +239,31 @@ export class CaptureEngine {
 		this.onCountChange?.(this.tweetCount());
 	}
 
+	/** Mark tweets as already in the library and drop local payloads. */
+	markSynced(ids: string[]): void {
+		if (ids.length === 0) return;
+		this.clearPersistTimer();
+		for (const id of ids) {
+			delete this.tweets[id];
+			this.seen.add(id);
+			this.synced.add(id);
+		}
+		this.schedulePersist();
+		this.onCountChange?.(this.tweetCount());
+	}
+
+	/** Remove tweets that were included in a successful upload. */
+	removeSynced(ids: string[]): void {
+		this.markSynced(ids);
+	}
+
 	/** Clear captured data after a successful export; capture keeps running. */
 	async reset(): Promise<void> {
 		this.clearPersistTimer();
 		this.tweets = {};
 		this.responses = [];
 		this.seen = new Set();
+		this.synced = new Set();
 		this.startedAt = new Date().toISOString();
 		await this.clearPersisted();
 		this.onCountChange?.(0);
@@ -248,6 +289,7 @@ export class CaptureEngine {
 					tweets: this.tweets,
 					responses: this.storeResponses ? this.responses : [],
 					seen: [...this.seen],
+					synced: [...this.synced],
 					startedAt: this.startedAt,
 					pageUrl: location.href,
 				})
@@ -255,6 +297,10 @@ export class CaptureEngine {
 					/* storage quota / dead extension context */
 				});
 		}, this.persistDebounceMs);
+	}
+
+	private isAlreadyInLibrary(id: string): boolean {
+		return this.synced.has(id) || (this.isLibraryCached?.(id) ?? false);
 	}
 
 	private addTweet(t: unknown): void {
@@ -265,8 +311,20 @@ export class CaptureEngine {
 			this.observedTweets.add(id);
 			this.onTweetObserved?.(id);
 		}
+		if (this.isAlreadyInLibrary(id)) {
+			if (!this.seen.has(id)) this.seen.add(id);
+			this.onAlreadyInLibrary?.(id);
+			return;
+		}
 		if (this.seen.has(id)) {
 			const existing = this.tweets[id];
+			if (existing == null) {
+				if (this.synced.has(id)) return;
+				this.tweets[id] = tweet;
+				this.onCountChange?.(this.tweetCount());
+				this.schedulePersist();
+				return;
+			}
 			if (isRicherArticlePayload(tweet, existing)) {
 				const article = findHydratedArticleResult(tweet);
 				this.tweets[id] = article
@@ -428,10 +486,83 @@ export async function fetchLibraryStats(serverUrl: string): Promise<LibraryStats
 	return { total: data.total, posts: data.posts, articles: data.articles };
 }
 
+export interface TodayImportStats {
+	importedToday: number;
+	postsToday: number;
+	articlesToday: number;
+}
+
+export async function fetchTodayImportStats(
+	serverUrl: string,
+): Promise<TodayImportStats> {
+	const base = serverUrl.replace(/\/$/, "");
+	const res = await fetch(`${base}/api/import/today`);
+	if (!res.ok) throw new Error(`Today stats failed (${res.status})`);
+	const data = (await res.json()) as Partial<TodayImportStats>;
+	return {
+		importedToday: data.importedToday ?? 0,
+		postsToday: data.postsToday ?? 0,
+		articlesToday: data.articlesToday ?? 0,
+	};
+}
+
 /** @deprecated Use fetchLibraryStats */
 export async function fetchServerTotal(serverUrl: string): Promise<number> {
 	const stats = await fetchLibraryStats(serverUrl);
 	return stats.total;
+}
+
+/** Ask the server which tweet IDs are already in the library. */
+export async function filterKnownExternalIds(
+	serverUrl: string,
+	externalIds: string[],
+	source = "x",
+): Promise<string[]> {
+	if (externalIds.length === 0) return [];
+	const base = serverUrl.replace(/\/$/, "");
+	const res = await fetch(`${base}/api/import/known`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ source, externalIds }),
+	});
+	if (!res.ok) throw new Error(`Known check failed (${res.status})`);
+	const data = (await res.json()) as { known?: string[] };
+	return Array.isArray(data.known) ? data.known : [];
+}
+
+/** Download every library tweet id for extension cache warm-up. */
+export async function fetchAllLibraryExternalIds(
+	serverUrl: string,
+	source = "x",
+): Promise<string[]> {
+	const base = serverUrl.replace(/\/$/, "");
+	const ids: string[] = [];
+	let cursor = "0";
+	for (;;) {
+		const res = await fetch(
+			`${base}/api/import/known?source=${encodeURIComponent(source)}&cursor=${cursor}&limit=2000`,
+		);
+		if (!res.ok) throw new Error(`Library cache failed (${res.status})`);
+		const data = (await res.json()) as {
+			ids?: string[];
+			nextCursor?: string | null;
+		};
+		const page = Array.isArray(data.ids) ? data.ids : [];
+		ids.push(...page);
+		if (!data.nextCursor || page.length === 0) break;
+		cursor = data.nextCursor;
+	}
+	return ids;
+}
+
+export async function fetchPendingArticleTweetIds(
+	serverUrl: string,
+): Promise<string[]> {
+	const base = serverUrl.replace(/\/$/, "");
+	const res = await fetch(`${base}/api/import/articles/pending-ids`);
+	if (!res.ok) throw new Error(`Pending article ids failed (${res.status})`);
+	const data = (await res.json()) as { tweetIds?: string[] };
+	return Array.isArray(data.tweetIds) ? data.tweetIds : [];
 }
 
 export async function fetchPendingArticles(
