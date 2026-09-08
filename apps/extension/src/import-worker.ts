@@ -3,16 +3,19 @@ import {
 	type CaptureState,
 	type ExportPayload,
 } from "@repo/import/capture/engine";
+import type { ImportWorkerProgress } from "@repo/import";
 import {
 	idbDelete,
-	idbDeleteFromStore,
+	idbDeleteManyFromStore,
 	idbGet,
 	idbGetAllFromStore,
+	idbPutManyToStore,
 	idbPutToStore,
 	idbSet,
 	idbUpdate,
 	IMPORT_QUEUE_STORE,
 } from "./idb";
+import { loadSettings } from "./storage";
 
 const CAPTURE_KEY = "capture";
 const LEGACY_IMPORT_QUEUE_KEY = "bp-import-worker";
@@ -22,6 +25,7 @@ const RETRY_MS = 60_000;
 const IMPORT_LEASE_MS = 120_000;
 /** Chrome MV3 alarms cannot reliably fire sooner than ~30s. */
 const ALARM_MIN_MS = 30_000;
+const IMPORT_BATCH_SIZE = 50;
 
 export interface ImportWorkerEntry {
 	externalId: string;
@@ -50,30 +54,14 @@ interface ImportWorkerMeta {
 	lastError?: string;
 }
 
-export interface ImportWorkerProgress {
-	pending: number;
-	processingId?: string;
-	imported: number;
-	skipped: number;
-	items?: Array<{
-		externalId: string;
-		status: "pending" | "processing";
-		attempts: number;
-		enqueuedAt: number;
-		nextAt?: number;
-		lastError?: string;
-	}>;
-	completedIds?: string[];
-	importedDelta?: number;
-	skippedDelta?: number;
-	libraryTotal?: number | null;
-	lastError?: string;
-}
-
 const EMPTY_META: ImportWorkerMeta = {
 	imported: 0,
 	skipped: 0,
 };
+
+function isPendingEntry(entry: ImportWorkerEntry): boolean {
+	return Boolean(entry?.payload?.tweets && entry.externalId);
+}
 
 export async function loadImportWorkerState(): Promise<ImportWorkerState> {
 	const legacy = await idbGet<ImportWorkerState>(LEGACY_IMPORT_QUEUE_KEY);
@@ -91,11 +79,12 @@ export async function loadImportWorkerState(): Promise<ImportWorkerState> {
 		await idbDelete(LEGACY_IMPORT_QUEUE_KEY);
 	}
 
-	const [queue, savedMeta] = await Promise.all([
+	const [raw, savedMeta] = await Promise.all([
 		idbGetAllFromStore<ImportWorkerEntry>(IMPORT_QUEUE_STORE),
 		idbGet<ImportWorkerMeta>(IMPORT_META_KEY),
 	]);
-	queue.sort((a, b) => a.enqueuedAt - b.enqueuedAt);
+	const queue = raw.filter(isPendingEntry);
+	queue.sort((a, b) => (a.enqueuedAt ?? 0) - (b.enqueuedAt ?? 0));
 	const meta = savedMeta ?? EMPTY_META;
 	return { queue, ...meta };
 }
@@ -109,43 +98,82 @@ function singleTweetPayload(
 		...payload,
 		stats: { tweetCount: 1, responseCount: 0 },
 		tweets: { [externalId]: tweet },
-		// Capture responses can contain an entire page and must not be duplicated
-		// for every queued tweet. Rich article data is already stamped on the tweet.
 		responses: [],
 	};
+}
+
+function batchPayload(entries: ImportWorkerEntry[]): ExportPayload {
+	const first = entries[0]!.payload;
+	const tweets: Record<string, unknown> = {};
+	for (const entry of entries) {
+		const tweet = entry.payload.tweets[entry.externalId];
+		if (tweet != null) tweets[entry.externalId] = tweet;
+	}
+	return {
+		...first,
+		stats: { tweetCount: Object.keys(tweets).length, responseCount: 0 },
+		tweets,
+		responses: [],
+	};
+}
+
+function readyEntries(
+	queue: ImportWorkerEntry[],
+	now = Date.now(),
+): ImportWorkerEntry[] {
+	return queue.filter((entry) => !entry.nextAt || entry.nextAt <= now);
+}
+
+async function resolveServerUrl(preferred?: string): Promise<string> {
+	if (preferred && preferred.trim()) return preferred.trim();
+	const settings = await loadSettings();
+	if (settings.serverUrl?.trim()) return settings.serverUrl.trim();
+	throw new Error("Server URL is not configured");
 }
 
 export async function enqueueImportPayload(
 	payload: ExportPayload,
 	serverUrl: string,
 ): Promise<ImportWorkerState> {
+	const resolvedUrl = await resolveServerUrl(serverUrl);
 	const state = await loadImportWorkerState();
 	const queued = new Set(state.queue.map((entry) => entry.externalId));
+	const added: ImportWorkerEntry[] = [];
 	for (const [externalId, tweet] of Object.entries(payload.tweets)) {
 		if (queued.has(externalId)) continue;
 		const entry: ImportWorkerEntry = {
 			externalId,
 			payload: singleTweetPayload(payload, externalId, tweet),
-			serverUrl,
+			serverUrl: resolvedUrl,
 			attempts: 0,
 			enqueuedAt: Date.now(),
 		};
-		await idbPutToStore(IMPORT_QUEUE_STORE, entry);
+		added.push(entry);
 		state.queue.push(entry);
 		queued.add(externalId);
 	}
+	await idbPutManyToStore(IMPORT_QUEUE_STORE, added);
 	if (state.queue.length > 0) {
-		// Durable wake-up in case Chrome suspends the service worker mid-drain.
 		await scheduleNext(Date.now() + RETRY_MS);
 	}
 	return state;
 }
 
-async function removeFromCapture(externalId: string): Promise<void> {
+async function removeFromCapture(externalIds: string[]): Promise<void> {
+	if (externalIds.length === 0) return;
 	const capture = await idbGet<CaptureState>(CAPTURE_KEY);
-	if (!capture?.tweets?.[externalId]) return;
-	delete capture.tweets[externalId];
-	await idbSet(CAPTURE_KEY, capture);
+	if (!capture?.tweets) return;
+	let changed = false;
+	for (const externalId of externalIds) {
+		if (!(externalId in capture.tweets)) continue;
+		delete capture.tweets[externalId];
+		changed = true;
+	}
+	if (changed) await idbSet(CAPTURE_KEY, capture);
+}
+
+function notifyProgress(progress: ImportWorkerProgress): void {
+	void broadcast(progress);
 }
 
 async function broadcast(progress: ImportWorkerProgress): Promise<void> {
@@ -168,7 +196,11 @@ async function broadcast(progress: ImportWorkerProgress): Promise<void> {
 function progressOf(
 	state: ImportWorkerState,
 	extra: Partial<ImportWorkerProgress> = {},
+	processingIds?: Set<string>,
 ): ImportWorkerProgress {
+	const processing =
+		processingIds ??
+		(state.processingId ? new Set([state.processingId]) : new Set<string>());
 	return {
 		pending: state.queue.length,
 		processingId: state.processingId,
@@ -176,9 +208,8 @@ function progressOf(
 		skipped: state.skipped,
 		items: state.queue.slice(0, 100).map((entry) => ({
 			externalId: entry.externalId,
-			status:
-				entry.externalId === state.processingId ? "processing" : "pending",
-			attempts: entry.attempts,
+			status: processing.has(entry.externalId) ? "processing" : "pending",
+			attempts: entry.attempts ?? 0,
 			enqueuedAt: entry.enqueuedAt,
 			nextAt: entry.nextAt,
 			lastError: entry.lastError,
@@ -189,16 +220,12 @@ function progressOf(
 }
 
 async function scheduleNext(when: number): Promise<void> {
-	await chrome.alarms.create(IMPORT_QUEUE_ALARM, {
-		when: Math.max(Date.now() + ALARM_MIN_MS, when),
-	});
-}
-
-/** Keep draining while the service worker is awake — no localhost throttle. */
-function continueImportSoon(): void {
-	setTimeout(() => {
-		void processNextImport();
-	}, 0);
+	const needed = Math.max(Date.now() + ALARM_MIN_MS, when);
+	const existing = await chrome.alarms.get(IMPORT_QUEUE_ALARM);
+	if (existing?.scheduledTime != null && existing.scheduledTime <= needed) {
+		return;
+	}
+	await chrome.alarms.create(IMPORT_QUEUE_ALARM, { when: needed });
 }
 
 async function acquireImportLease(externalId: string): Promise<boolean> {
@@ -236,69 +263,109 @@ async function releaseImportLease(input?: {
 	});
 }
 
-/** Process at most one persisted tweet. Each call is one MV3 worker event. */
-export async function processNextImport(): Promise<ImportWorkerState> {
+async function processOneBatch(): Promise<{
+	progress: ImportWorkerProgress;
+	didWork: boolean;
+}> {
 	let state = await loadImportWorkerState();
-	const entry = state.queue[0];
-	if (!entry) {
-		await chrome.alarms.clear(IMPORT_QUEUE_ALARM);
-		return state;
+	const batch = readyEntries(state.queue).slice(0, IMPORT_BATCH_SIZE);
+	if (batch.length === 0) {
+		if (state.queue.length === 0) {
+			await chrome.alarms.clear(IMPORT_QUEUE_ALARM);
+			return { progress: progressOf(state), didWork: false };
+		}
+		const nextAt = Math.min(
+			...state.queue.map((entry) => entry.nextAt ?? Date.now()),
+		);
+		await scheduleNext(nextAt);
+		return { progress: progressOf(state), didWork: false };
 	}
-	if (entry.nextAt && entry.nextAt > Date.now()) {
-		await scheduleNext(entry.nextAt);
-		return state;
-	}
-	if (!(await acquireImportLease(entry.externalId))) {
+
+	const head = batch[0]!;
+	if (!(await acquireImportLease(head.externalId))) {
 		state = await loadImportWorkerState();
 		await scheduleNext(state.leaseUntil ?? Date.now() + RETRY_MS);
-		return state;
+		return { progress: progressOf(state), didWork: false };
 	}
 
 	state = await loadImportWorkerState();
-	await broadcast(progressOf(state));
+	const processingIds = new Set(batch.map((entry) => entry.externalId));
+	notifyProgress(progressOf(state, {}, processingIds));
 
 	try {
-		const result = await uploadPayload(entry.payload, entry.serverUrl);
+		const serverUrl = await resolveServerUrl(head.serverUrl);
+		const result = await uploadPayload(batchPayload(batch), serverUrl);
 		const accounted = result.imported + result.skipped;
-		if (accounted !== 1) {
-			throw new Error("Server did not account for the queued tweet");
+		if (accounted === 0) {
+			throw new Error("Server did not account for the queued tweets");
 		}
-		await idbDeleteFromStore(IMPORT_QUEUE_STORE, entry.externalId);
+		if (accounted !== batch.length) {
+			throw new Error(
+				`Server accounted for ${accounted} of ${batch.length} queued tweets`,
+			);
+		}
+
+		await idbDeleteManyFromStore(
+			IMPORT_QUEUE_STORE,
+			batch.map((entry) => entry.externalId),
+		);
 		await releaseImportLease({
 			imported: result.imported,
 			skipped: result.skipped,
 		});
-		await removeFromCapture(entry.externalId);
+		await removeFromCapture(batch.map((entry) => entry.externalId));
 		state = await loadImportWorkerState();
-		await broadcast(
-			progressOf(state, {
-				completedIds: [entry.externalId],
-				importedDelta: result.imported,
-				skippedDelta: result.skipped,
-				libraryTotal: result.total,
-			}),
-		);
+		const progress = progressOf(state, {
+			completedIds: batch.map((entry) => entry.externalId),
+			importedDelta: result.imported,
+			skippedDelta: result.skipped,
+			libraryTotal: result.total,
+		});
+		notifyProgress(progress);
 		if (state.queue.length > 0) {
-			// Durable wake-up only — X rate limits live in article hydration, not here.
 			await scheduleNext(Date.now() + RETRY_MS);
-			continueImportSoon();
 		} else {
 			await chrome.alarms.clear(IMPORT_QUEUE_ALARM);
 		}
-		return state;
+		return { progress, didWork: true };
 	} catch (error) {
 		const message =
 			error instanceof Error ? error.message : "Import worker failed";
-		entry.attempts += 1;
-		entry.lastError = message;
-		entry.nextAt = Date.now() + RETRY_MS;
-		await idbPutToStore(IMPORT_QUEUE_STORE, entry);
+		const nextAt = Date.now() + RETRY_MS;
+		await idbPutManyToStore(
+			IMPORT_QUEUE_STORE,
+			batch.map((entry) => ({
+				...entry,
+				serverUrl: entry.serverUrl || head.serverUrl,
+				attempts: (entry.attempts ?? 0) + 1,
+				lastError: message,
+				nextAt,
+			})),
+		);
 		await releaseImportLease({ lastError: message });
 		state = await loadImportWorkerState();
-		await broadcast(progressOf(state));
-		await scheduleNext(entry.nextAt);
-		return state;
+		const progress = progressOf(state);
+		notifyProgress(progress);
+		await scheduleNext(nextAt);
+		return { progress, didWork: false };
 	}
+}
+
+/**
+ * Drain ready batches of up to 50 tweets in the service worker.
+ * Uses chrome.alarms for wakeups — no setTimeout.
+ */
+export async function processNextImport(): Promise<ImportWorkerProgress> {
+	let progress = progressOf(await loadImportWorkerState());
+	for (;;) {
+		const step = await processOneBatch();
+		progress = step.progress;
+		if (!step.didWork) break;
+		if (readyEntries((await loadImportWorkerState()).queue).length === 0) {
+			break;
+		}
+	}
+	return progress;
 }
 
 export function importWorkerProgress(

@@ -654,9 +654,9 @@ async function handleWorkerMessage(
 					message.payload as ExportPayload,
 					String(message.serverUrl),
 				);
-				const state = await processNextImport();
-				scheduleSyncStatusPush(state.lastError);
-				return importWorkerProgress(state);
+				const progress = await processNextImport();
+				scheduleSyncStatusPush(progress.lastError);
+				return progress;
 			}
 			case "bp-fetch-total":
 				return { total: await fetchServerTotal(String(message.serverUrl)) };
@@ -769,8 +769,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.alarms.onAlarm.addListener((alarm) => {
 	if (alarm.name === IMPORT_QUEUE_ALARM) {
 		void (async () => {
-			const state = await processNextImport();
-			scheduleSyncStatusPush(state.lastError);
+			const progress = await processNextImport();
+			scheduleSyncStatusPush(progress.lastError);
 		})();
 		return;
 	}

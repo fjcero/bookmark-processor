@@ -398,14 +398,11 @@ async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
 			pendingPayload,
 			settings.serverUrl,
 		);
+		applyImportProgress(progress);
 		if (progress.lastError) {
 			workerPaused = true;
-			setSyncStatus(sidebar, "Background import paused — retrying");
-			setSyncRetryVisible(sidebar, true);
 			return;
 		}
-		renderSessionProgress();
-		setSyncRetryVisible(sidebar, false);
 	} catch (err) {
 		workerPaused = true;
 		const msg = err instanceof Error ? err.message : "Sync failed";

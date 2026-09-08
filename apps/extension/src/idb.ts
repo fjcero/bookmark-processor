@@ -99,10 +99,19 @@ export async function idbPutToStore(
 	storeName: string,
 	value: unknown,
 ): Promise<void> {
+	await idbPutManyToStore(storeName, [value]);
+}
+
+export async function idbPutManyToStore(
+	storeName: string,
+	values: unknown[],
+): Promise<void> {
+	if (values.length === 0) return;
 	const db = await openDb();
 	return new Promise((resolve, reject) => {
 		const tx = db.transaction(storeName, "readwrite");
-		tx.objectStore(storeName).put(value);
+		const store = tx.objectStore(storeName);
+		for (const value of values) store.put(value);
 		tx.oncomplete = () => {
 			db.close();
 			resolve();
@@ -115,10 +124,19 @@ export async function idbDeleteFromStore(
 	storeName: string,
 	key: IDBValidKey,
 ): Promise<void> {
+	await idbDeleteManyFromStore(storeName, [key]);
+}
+
+export async function idbDeleteManyFromStore(
+	storeName: string,
+	keys: IDBValidKey[],
+): Promise<void> {
+	if (keys.length === 0) return;
 	const db = await openDb();
 	return new Promise((resolve, reject) => {
 		const tx = db.transaction(storeName, "readwrite");
-		tx.objectStore(storeName).delete(key);
+		const store = tx.objectStore(storeName);
+		for (const key of keys) store.delete(key);
 		tx.oncomplete = () => {
 			db.close();
 			resolve();
