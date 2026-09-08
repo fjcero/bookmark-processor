@@ -26,6 +26,7 @@ import {
 	isLibraryCached,
 	loadLibraryCache,
 	saveLibraryCache,
+	clearLibraryCacheMemory,
 } from "./core/library-cache";
 import { loadSettings } from "./core/storage";
 import {
@@ -270,13 +271,16 @@ function queueKnownCheck(tweetId: string): void {
 	}, 400);
 }
 
-async function prepareCaptureSession(engine: CaptureEngine): Promise<void> {
-	await loadLibraryCache();
+async function prepareCaptureSession(): Promise<void> {
 	const settings = await loadSettings();
-	if (settings.mode !== "api" || !settings.serverUrl) return;
+	if (settings.mode !== "api" || !settings.serverUrl) {
+		await loadLibraryCache();
+		return;
+	}
 	try {
 		await hydrateLibraryCacheInBackground(settings.serverUrl);
-		engine.markSynced([...(await loadLibraryCache())]);
+		clearLibraryCacheMemory();
+		await loadLibraryCache();
 		await reconcileArticlesInBackground(settings.serverUrl);
 		void refreshArticleStats();
 	} catch (err) {
@@ -729,7 +733,7 @@ async function startCapture(): Promise<void> {
 
 	try {
 		const restored = await engine.restore();
-		await prepareCaptureSession(engine);
+		await prepareCaptureSession();
 		engine.start();
 		mountUi();
 		if (restored && engine.tweetCount() > 0) {
@@ -739,7 +743,7 @@ async function startCapture(): Promise<void> {
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		console.warn("[Bookmark Processor] Capture start failed:", msg);
-		await prepareCaptureSession(engine);
+		await prepareCaptureSession();
 		engine.start();
 		mountUi();
 	}
@@ -770,6 +774,12 @@ async function stopCapture(): Promise<void> {
 	sessionImported = 0;
 	sessionSkipped = 0;
 	sessionAlreadyHadIds.clear();
+	clearLibraryCacheMemory();
+	try {
+		void chrome.runtime.sendMessage({ type: "bp-compact-storage" });
+	} catch {
+		/* background unavailable */
+	}
 	showToast("Capture stopped");
 }
 
@@ -834,6 +844,13 @@ function registerMessageListener(): void {
 			}
 			if (message?.type === "bp-import-progress") {
 				if (message.progress) applyImportProgress(message.progress);
+				return false;
+			}
+			if (message?.type === "bp-storage-quota-error") {
+				showToast(
+					"Local storage full. Finish sync or clear browsing data for this extension.",
+				);
+				setCaptureSyncStatus("Local storage full. Finish sync, then retry.");
 				return false;
 			}
 			if (message?.type === "bp-capture-status") {

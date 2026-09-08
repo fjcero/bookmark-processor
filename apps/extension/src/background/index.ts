@@ -1,5 +1,7 @@
-import { SYNC_STATUS_ALARM } from "../core/constants";
+import { STORAGE_COMPACT_ALARM, SYNC_STATUS_ALARM } from "../core/constants";
+import { setQuotaRecoveryHandler } from "../core/idb";
 import { processNextImport } from "../core/import-worker";
+import { compactExtensionStorage } from "../core/storage-compact";
 import {
 	AlarmRegistry,
 	getPlatforms,
@@ -17,6 +19,9 @@ import { syncWithServer } from "./sync-server";
 const router = new MessageRouter();
 const alarms = new AlarmRegistry();
 
+setQuotaRecoveryHandler(async () => {
+	await compactExtensionStorage({ aggressive: true });
+});
 registerCaptureStateHandlers(router);
 registerImportHandlers(router);
 registerCoreAlarms(alarms);
@@ -38,6 +43,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 async function startBackground(): Promise<void> {
+	scheduleStorageCompactAlarm();
 	await migrateLegacyPendingUpload();
 	await processNextImport();
 	for (const platform of getPlatforms()) {
@@ -46,14 +52,19 @@ async function startBackground(): Promise<void> {
 	void syncWithServer();
 }
 
+function scheduleStorageCompactAlarm(): void {
+	void chrome.alarms.create(STORAGE_COMPACT_ALARM, { periodInMinutes: 360 });
+	void chrome.alarms.create(SYNC_STATUS_ALARM, { periodInMinutes: 1 });
+}
+
 chrome.runtime.onInstalled.addListener(() => {
 	clearLegacyStorage();
-	void chrome.alarms.create(SYNC_STATUS_ALARM, { periodInMinutes: 1 });
+	scheduleStorageCompactAlarm();
 	void startBackground();
 });
 
 chrome.runtime.onStartup.addListener(() => {
-	void chrome.alarms.create(SYNC_STATUS_ALARM, { periodInMinutes: 1 });
+	scheduleStorageCompactAlarm();
 	void startBackground();
 });
 

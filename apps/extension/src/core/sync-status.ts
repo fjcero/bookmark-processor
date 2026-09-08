@@ -3,9 +3,12 @@ import type {
 	SyncRevocation,
 	SyncStatusResponse,
 } from "@repo/import";
-import type { CaptureState } from "@repo/import/capture/engine";
+import {
+	toPersistedCaptureState,
+	type CaptureState,
+} from "@repo/import/capture/engine";
 import { CAPTURE_KEY } from "./constants";
-import { idbGet, idbSet } from "./idb";
+import { idbDelete, idbGet, idbSet } from "./idb";
 
 export async function buildExtensionStatusReport(input: {
 	articles: ExtensionStatusReport["articles"];
@@ -57,7 +60,12 @@ export async function applyCaptureRevocations(
 			delete capture.tweets[rev.externalId];
 			if (rev.tweetId) delete capture.tweets[rev.tweetId];
 		}
-		await idbSet(CAPTURE_KEY, capture);
+		const slim = toPersistedCaptureState(capture);
+		if (Object.keys(slim.tweets).length === 0 && !(slim.responses?.length)) {
+			await idbDelete(CAPTURE_KEY);
+		} else {
+			await idbSet(CAPTURE_KEY, slim);
+		}
 	}
 
 	return revocations.map((rev) => rev.id);

@@ -5,15 +5,14 @@ import {
 	useEffect,
 	useRef,
 	useState,
+	Fragment,
 	type ReactNode,
 } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import type { ActivitySeries } from "@/lib/activity-types";
 import type { EmbeddedTweet } from "@/lib/embeds";
 import { ITEMS_PAGE_SIZE } from "@/lib/items-config";
 import type { ImportPrefs, ItemSort, ViewMode } from "@/lib/import-prefs";
 import { type ClientItem } from "@/lib/item-dto";
-import ActivityHeatmap from "./activity-heatmap";
 import ItemSearchBar, { type ItemSearchState } from "./item-search-bar";
 import {
 	ArticleBody,
@@ -212,7 +211,6 @@ const STAGE_LABEL: Record<NonNullable<ProcessState["stage"]>, string> = {
 
 export default function HomeClient({
 	initialStats,
-	initialActivity,
 	initialItems,
 	initialHasMore,
 	initialImportPrefs,
@@ -220,7 +218,6 @@ export default function HomeClient({
 	initialSort,
 }: {
 	initialStats: Stats;
-	initialActivity: ActivitySeries;
 	initialItems: ClientItem[];
 	initialHasMore: boolean;
 	initialImportPrefs: ImportPrefs;
@@ -228,7 +225,6 @@ export default function HomeClient({
 	initialSort: ItemSort;
 }) {
 	const [stats, setStats] = useState<Stats>(initialStats);
-	const [activity, setActivity] = useState<ActivitySeries>(initialActivity);
 	const [items, setItems] = useState<ClientItem[]>(initialItems);
 	const [hasMore, setHasMore] = useState(initialHasMore);
 	const [loadingMore, setLoadingMore] = useState(false);
@@ -301,7 +297,7 @@ export default function HomeClient({
 	}, [hasMore, items, search, sort]);
 
 	const refresh = useCallback(async () => {
-		const [statsRes, itemsRes, activityRes, syncRes] = await Promise.all([
+		const [statsRes, itemsRes, syncRes] = await Promise.all([
 			fetch("/api/stats"),
 			fetch(
 				buildItemsQuery({
@@ -311,11 +307,9 @@ export default function HomeClient({
 					sort,
 				}),
 			),
-			fetch("/api/activity"),
 			fetch("/api/import/status"),
 		]);
 		if (statsRes.ok) setStats((await statsRes.json()) as Stats);
-		if (activityRes.ok) setActivity(await activityRes.json());
 		if (syncRes.ok) setSyncStatus((await syncRes.json()) as SyncStatusResponse);
 		if (itemsRes.ok) {
 			const data = (await itemsRes.json()) as {
@@ -822,8 +816,6 @@ export default function HomeClient({
 					</>
 				) : (
 					<>
-				<ActivityHeatmap series={activity} />
-
 				<ItemSearchBar
 					value={search}
 					onChange={setSearch}
@@ -867,40 +859,45 @@ export default function HomeClient({
 							: "No items yet. Upload an export to get started."}
 					</p>
 				) : view === "grid" ? (
-					<section
-						className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"
-					>
-						{items.map((item) => (
-							<article
-								key={item.id}
-								data-item-id={item.id}
-								onClick={() => openItem(item.id)}
-								className={`flex cursor-pointer flex-col rounded-xl border bg-zinc-900/40 p-4 ${
-									selectedId === item.id
-										? "border-violet-400 ring-1 ring-violet-400/40"
-										: "border-zinc-800 hover:border-zinc-600"
-								}`}
-							>
-								<div className="mb-3 flex items-start justify-between gap-2">
-									<div className="min-w-0">
-										<Author item={item} />
-									</div>
-									<TypeBadges item={item} />
-								</div>
-								<div className="flex-1">
-									<ItemTextPreview item={item} />
-								</div>
-								{(item.embeds?.length ?? 0) > 0 && (
-									<EmbeddedTweetList embeds={item.embeds ?? []} compact className="mt-3" />
+					<section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+						{displayGroups(items, sort).map(({ year, items: yearItems }) => (
+							<Fragment key={year ?? "all"}>
+								{year !== null && (
+									<YearHeading year={year} count={yearItems.length} />
 								)}
-								<ItemMedia urls={item.mediaUrls} className="mt-3" compact />
-								<div className="mt-3 flex items-end justify-between gap-2">
-									<div className="flex min-w-0 flex-1 flex-wrap gap-1">
-										<CategoryBadges item={item} />
-									</div>
-									<ItemDate item={item} sort={sort} />
-								</div>
-							</article>
+								{yearItems.map((item) => (
+									<article
+										key={item.id}
+										data-item-id={item.id}
+										onClick={() => openItem(item.id)}
+										className={`flex cursor-pointer flex-col rounded-xl border bg-zinc-900/40 p-4 ${
+											selectedId === item.id
+												? "border-violet-400 ring-1 ring-violet-400/40"
+												: "border-zinc-800 hover:border-zinc-600"
+										}`}
+									>
+										<div className="mb-3 flex items-start justify-between gap-2">
+											<div className="min-w-0">
+												<Author item={item} />
+											</div>
+											<TypeBadges item={item} />
+										</div>
+										<div className="flex-1">
+											<ItemTextPreview item={item} />
+										</div>
+										{(item.embeds?.length ?? 0) > 0 && (
+											<EmbeddedTweetList embeds={item.embeds ?? []} compact className="mt-3" />
+										)}
+										<ItemMedia urls={item.mediaUrls} className="mt-3" compact />
+										<div className="mt-3 flex items-end justify-between gap-2">
+											<div className="flex min-w-0 flex-1 flex-wrap gap-1">
+												<CategoryBadges item={item} />
+											</div>
+											<ItemDate item={item} />
+										</div>
+									</article>
+								))}
+							</Fragment>
 						))}
 					</section>
 				) : (
@@ -916,47 +913,66 @@ export default function HomeClient({
 								</tr>
 							</thead>
 							<tbody>
-								{items.map((item) => (
-									<tr
-										key={item.id}
-										data-item-id={item.id}
-										onClick={() => openItem(item.id)}
-										className={`cursor-pointer border-t border-zinc-800 align-top ${
-											selectedId === item.id
-												? "bg-violet-500/10"
-												: "hover:bg-zinc-900/70"
-										}`}
-									>
-										<td className="px-4 py-3 whitespace-nowrap">
-											<Author item={item} />
-										</td>
-										<td className="px-4 py-3 whitespace-nowrap">
-											<ItemDate item={item} sort={sort} />
-										</td>
-										<td className="px-4 py-3">
-											<TypeBadges item={item} />
-										</td>
-										<td className="px-4 py-3 text-zinc-300">
-											<ItemTextPreview item={item} lines={3} />
-											{(item.embeds?.length ?? 0) > 0 && (
-												<EmbeddedTweetList
-													embeds={item.embeds ?? []}
-													compact
-													className="mt-2 max-w-xl"
-												/>
-											)}
-											<ItemMedia
-												urls={item.mediaUrls}
-												className="mt-2"
-												compact
-											/>
-										</td>
-										<td className="px-4 py-3">
-											<div className="flex flex-wrap gap-1">
-												<CategoryBadges item={item} />
-											</div>
-										</td>
-									</tr>
+								{displayGroups(items, sort).map(({ year, items: yearItems }) => (
+									<Fragment key={year ?? "all"}>
+										{year !== null && (
+											<tr className="border-t border-zinc-800 bg-zinc-900/50">
+												<td colSpan={5} className="px-4 py-2.5">
+													<div className="flex items-baseline gap-2">
+														<span className="text-sm font-medium text-zinc-200">
+															{year}
+														</span>
+														<span className="font-mono text-[11px] text-zinc-500">
+															{yearItems.length}{" "}
+															{yearItems.length === 1 ? "bookmark" : "bookmarks"}
+														</span>
+													</div>
+												</td>
+											</tr>
+										)}
+										{yearItems.map((item) => (
+											<tr
+												key={item.id}
+												data-item-id={item.id}
+												onClick={() => openItem(item.id)}
+												className={`cursor-pointer border-t border-zinc-800 align-top ${
+													selectedId === item.id
+														? "bg-violet-500/10"
+														: "hover:bg-zinc-900/70"
+												}`}
+											>
+												<td className="px-4 py-3 whitespace-nowrap">
+													<Author item={item} />
+												</td>
+												<td className="px-4 py-3 whitespace-nowrap">
+													<ItemDate item={item} />
+												</td>
+												<td className="px-4 py-3">
+													<TypeBadges item={item} />
+												</td>
+												<td className="px-4 py-3 text-zinc-300">
+													<ItemTextPreview item={item} lines={3} />
+													{(item.embeds?.length ?? 0) > 0 && (
+														<EmbeddedTweetList
+															embeds={item.embeds ?? []}
+															compact
+															className="mt-2 max-w-xl"
+														/>
+													)}
+													<ItemMedia
+														urls={item.mediaUrls}
+														className="mt-2"
+														compact
+													/>
+												</td>
+												<td className="px-4 py-3">
+													<div className="flex flex-wrap gap-1">
+														<CategoryBadges item={item} />
+													</div>
+												</td>
+											</tr>
+										))}
+									</Fragment>
 								))}
 							</tbody>
 						</table>
@@ -998,14 +1014,8 @@ export default function HomeClient({
 	);
 }
 
-function itemDisplayDate(
-	item: ClientItem,
-	sort: ItemSort,
-): { iso: string; text: string } {
-	const iso =
-		sort === "published"
-			? item.publishedAt ?? item.importedAt
-			: item.importedAt;
+function itemDisplayDate(item: ClientItem): { iso: string; text: string } {
+	const iso = item.publishedAt ?? item.importedAt;
 	return {
 		iso,
 		text: new Date(iso).toLocaleDateString(undefined, {
@@ -1014,16 +1024,61 @@ function itemDisplayDate(
 	};
 }
 
+function itemYear(item: ClientItem): number {
+	return new Date(item.publishedAt ?? item.importedAt).getFullYear();
+}
+
+function groupItemsByYear(
+	items: ClientItem[],
+): Array<{ year: number | null; items: ClientItem[] }> {
+	const groups: Array<{ year: number; items: ClientItem[] }> = [];
+	for (const item of items) {
+		const year = itemYear(item);
+		const last = groups[groups.length - 1];
+		if (last?.year === year) {
+			last.items.push(item);
+		} else {
+			groups.push({ year, items: [item] });
+		}
+	}
+	return groups;
+}
+
+function displayGroups(
+	items: ClientItem[],
+	sort: ItemSort,
+): Array<{ year: number | null; items: ClientItem[] }> {
+	if (sort !== "published") return [{ year: null, items }];
+	return groupItemsByYear(items);
+}
+
+function YearHeading({
+	year,
+	count,
+}: {
+	year: number;
+	count: number;
+}) {
+	return (
+		<div className="col-span-full flex items-baseline gap-2 pt-2 first:pt-0">
+			<h2 className="text-lg font-medium tracking-tight text-zinc-200">
+				{year}
+			</h2>
+			<span className="font-mono text-[11px] text-zinc-500">
+				{count} {count === 1 ? "bookmark" : "bookmarks"}
+			</span>
+		</div>
+	);
+}
+
 function ItemDate({
 	item,
-	sort,
 	className = "",
 }: {
 	item: ClientItem;
-	sort: ItemSort;
 	className?: string;
 }) {
-	const { iso, text } = itemDisplayDate(item, sort);
+	const { iso, text } = itemDisplayDate(item);
 	return (
 		<time
 			dateTime={iso}

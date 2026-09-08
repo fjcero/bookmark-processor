@@ -25,6 +25,7 @@ import {
 import { isRicherTweetPayload } from "../src/tweet-richness";
 import { applySortIndexes } from "../src/sort-index";
 import { isImportableTweet } from "../src/parse.ts";
+import { toPersistedCaptureState } from "./persist-state.ts";
 
 export interface CaptureResponse {
 	url: string;
@@ -49,6 +50,8 @@ export interface CaptureStorage {
 	save(state: CaptureState): Promise<void>;
 	clear(): Promise<void>;
 }
+
+export { toPersistedCaptureState } from "./persist-state.ts";
 
 export interface CaptureEngineOptions {
 	storage?: CaptureStorage;
@@ -173,8 +176,8 @@ export class CaptureEngine {
 		if (!saved?.tweets) return false;
 		this.tweets = saved.tweets;
 		this.responses = saved.responses ?? [];
-		this.seen = new Set(saved.seen ?? Object.keys(saved.tweets));
-		this.synced = new Set(saved.synced ?? []);
+		this.seen = new Set(Object.keys(saved.tweets));
+		this.synced = new Set();
 		this.startedAt = saved.startedAt ?? this.startedAt;
 		this.onCountChange?.(this.tweetCount());
 		return this.tweetCount() > 0;
@@ -284,17 +287,22 @@ export class CaptureEngine {
 		this.persistTimer = setTimeout(() => {
 			this.persistTimer = null;
 			void this.storage
-				?.save({
-					source: this.source,
-					tweets: this.tweets,
-					responses: this.storeResponses ? this.responses : [],
-					seen: [...this.seen],
-					synced: [...this.synced],
-					startedAt: this.startedAt,
-					pageUrl: location.href,
-				})
-				.catch(() => {
-					/* storage quota / dead extension context */
+				?.save(
+					toPersistedCaptureState({
+						source: this.source,
+						tweets: this.tweets,
+						responses: this.storeResponses ? this.responses : [],
+						seen: [],
+						synced: [],
+						startedAt: this.startedAt,
+						pageUrl: location.href,
+					}),
+				)
+				.catch((err) => {
+					console.warn(
+						"[Bookmark Processor] Capture persist failed:",
+						err instanceof Error ? err.message : err,
+					);
 				});
 		}, this.persistDebounceMs);
 	}

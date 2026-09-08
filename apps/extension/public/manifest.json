@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Bookmark Processor Capture",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Capture X bookmarks, likes, and your replies, then download JSON or send to Bookmark Processor.",
   "permissions": ["storage", "unlimitedStorage", "activeTab", "alarms", "tabs"],
   "host_permissions": [

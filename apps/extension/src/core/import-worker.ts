@@ -20,7 +20,7 @@ import {
 } from "./idb";
 import { allTabUrlPatterns } from "./platform";
 import { loadSettings } from "./storage";
-import { loadLibraryCache } from "./library-cache";
+import { loadLibraryCache, saveLibraryCache } from "./library-cache";
 
 const LEGACY_IMPORT_QUEUE_KEY = "bp-import-worker";
 const IMPORT_META_KEY = "bp-import-worker-meta";
@@ -142,13 +142,11 @@ export async function enqueueImportPayload(
 	const resolvedUrl = await resolveServerUrl(serverUrl);
 	const state = await loadImportWorkerState();
 	const queued = new Set(state.queue.map((entry) => entry.externalId));
-	const synced = await loadSyncedExternalIds();
 	const library = await loadLibraryCache();
 	const added: ImportWorkerEntry[] = [];
 	for (const [externalId, tweet] of Object.entries(payload.tweets)) {
 		if (
 			queued.has(externalId) ||
-			synced.has(externalId) ||
 			library.has(externalId) ||
 			!isImportableTweet(tweet)
 		) {
@@ -174,28 +172,55 @@ export async function enqueueImportPayload(
 
 async function removeFromCapture(externalIds: string[]): Promise<void> {
 	if (externalIds.length === 0) return;
+	await saveLibraryCache(externalIds);
 	const capture = await idbGet<CaptureState>(CAPTURE_KEY);
-	if (!capture) return;
+	if (!capture?.tweets) return;
 	let changed = false;
-	const synced = new Set(capture.synced ?? []);
 	for (const externalId of externalIds) {
-		if (capture.tweets && externalId in capture.tweets) {
+		if (externalId in capture.tweets) {
 			delete capture.tweets[externalId];
-			changed = true;
-		}
-		if (!synced.has(externalId)) {
-			synced.add(externalId);
 			changed = true;
 		}
 	}
 	if (!changed) return;
-	capture.synced = [...synced];
+	capture.seen = Object.keys(capture.tweets);
+	capture.synced = [];
+	if (capture.seen.length === 0 && !(capture.responses?.length)) {
+		await idbDelete(CAPTURE_KEY);
+		return;
+	}
 	await idbSet(CAPTURE_KEY, capture);
 }
 
-async function loadSyncedExternalIds(): Promise<Set<string>> {
-	const capture = await idbGet<CaptureState>(CAPTURE_KEY);
-	return new Set(capture?.synced ?? []);
+export async function getImportWorkStatus(): Promise<{
+	pendingCount: number;
+	leaseActive: boolean;
+	queuedIds: Set<string>;
+}> {
+	const state = await loadImportWorkerState();
+	return {
+		pendingCount: state.queue.length,
+		leaseActive: (state.leaseUntil ?? 0) > Date.now(),
+		queuedIds: new Set(state.queue.map((entry) => entry.externalId)),
+	};
+}
+
+export async function deleteInvalidImportQueueRows(): Promise<number> {
+	const raw = await idbGetAllFromStore<ImportWorkerEntry>(IMPORT_QUEUE_STORE);
+	const invalid = raw
+		.filter((entry) => !isPendingEntry(entry))
+		.map((entry) => entry.externalId)
+		.filter((id) => typeof id === "string" && id.length > 0);
+	await idbDeleteManyFromStore(IMPORT_QUEUE_STORE, invalid);
+	return invalid.length;
+}
+
+function scheduleCompactAfterDrain(): void {
+	void import("./storage-compact")
+		.then((mod) => mod.compactExtensionStorage())
+		.catch(() => {
+			/* compact is best-effort */
+		});
 }
 
 function notifyProgress(progress: ImportWorkerProgress): void {
@@ -288,6 +313,7 @@ async function processOneBatch(): Promise<{
 	if (batch.length === 0) {
 		if (state.queue.length === 0) {
 			await chrome.alarms.clear(IMPORT_QUEUE_ALARM);
+			scheduleCompactAfterDrain();
 			return { progress: progressOf(state), didWork: false };
 		}
 		const nextAt = Math.min(
@@ -344,6 +370,7 @@ async function processOneBatch(): Promise<{
 			await scheduleNext(Date.now() + RETRY_MS);
 		} else {
 			await chrome.alarms.clear(IMPORT_QUEUE_ALARM);
+			scheduleCompactAfterDrain();
 		}
 		return { progress, didWork: true };
 	} catch (error) {

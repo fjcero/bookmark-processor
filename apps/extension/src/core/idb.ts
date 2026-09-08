@@ -1,6 +1,50 @@
+import { broadcastToTabs } from "./broadcast";
+import { allTabUrlPatterns } from "./platform";
+import { isStorageQuotaError } from "./storage-quota";
+
 const DB_NAME = "bookmark-processor";
 const STORE = "state";
 export const IMPORT_QUEUE_STORE = "importQueue";
+
+const QUOTA_TAB_PATTERNS = ["https://x.com/*", "https://twitter.com/*"];
+
+let quotaRecovery: (() => Promise<void>) | null = null;
+let recovering = false;
+
+export function setQuotaRecoveryHandler(handler: () => Promise<void>): void {
+	quotaRecovery = handler;
+}
+
+export { isStorageQuotaError };
+
+async function notifyQuotaFailure(): Promise<void> {
+	const patterns = allTabUrlPatterns();
+	await broadcastToTabs(patterns.length > 0 ? patterns : QUOTA_TAB_PATTERNS, {
+		type: "bp-storage-quota-error",
+	});
+}
+
+async function withQuotaRetry<T>(op: () => Promise<T>): Promise<T> {
+	try {
+		return await op();
+	} catch (err) {
+		if (!isStorageQuotaError(err) || recovering || !quotaRecovery) throw err;
+		recovering = true;
+		try {
+			await quotaRecovery();
+		} finally {
+			recovering = false;
+		}
+		try {
+			return await op();
+		} catch (retryErr) {
+			if (isStorageQuotaError(retryErr)) {
+				await notifyQuotaFailure();
+			}
+			throw retryErr;
+		}
+	}
+}
 
 export function openDb(): Promise<IDBDatabase> {
 	return new Promise((resolve, reject) => {
@@ -31,7 +75,7 @@ export async function idbGet<T>(key: string): Promise<T | null> {
 	});
 }
 
-export async function idbSet(key: string, value: unknown): Promise<void> {
+async function idbSetOnce(key: string, value: unknown): Promise<void> {
 	const db = await openDb();
 	return new Promise((resolve, reject) => {
 		const tx = db.transaction(STORE, "readwrite");
@@ -41,7 +85,12 @@ export async function idbSet(key: string, value: unknown): Promise<void> {
 			resolve();
 		};
 		tx.onerror = () => reject(tx.error);
+		tx.onabort = () => reject(tx.error);
 	});
+}
+
+export async function idbSet(key: string, value: unknown): Promise<void> {
+	await withQuotaRetry(() => idbSetOnce(key, value));
 }
 
 export async function idbDelete(key: string): Promise<void> {
@@ -54,11 +103,11 @@ export async function idbDelete(key: string): Promise<void> {
 			resolve();
 		};
 		tx.onerror = () => reject(tx.error);
+		tx.onabort = () => reject(tx.error);
 	});
 }
 
-/** Atomically read and replace one value in the state store. */
-export async function idbUpdate<T>(
+async function idbUpdateOnce<T>(
 	key: string,
 	update: (current: T | null) => T,
 ): Promise<T> {
@@ -82,6 +131,14 @@ export async function idbUpdate<T>(
 	});
 }
 
+/** Atomically read and replace one value in the state store. */
+export async function idbUpdate<T>(
+	key: string,
+	update: (current: T | null) => T,
+): Promise<T> {
+	return withQuotaRetry(() => idbUpdateOnce(key, update));
+}
+
 export async function idbGetAllFromStore<T>(storeName: string): Promise<T[]> {
 	const db = await openDb();
 	return new Promise((resolve, reject) => {
@@ -100,11 +157,10 @@ export async function idbPutToStore(
 	await idbPutManyToStore(storeName, [value]);
 }
 
-export async function idbPutManyToStore(
+async function idbPutManyToStoreOnce(
 	storeName: string,
 	values: unknown[],
 ): Promise<void> {
-	if (values.length === 0) return;
 	const db = await openDb();
 	return new Promise((resolve, reject) => {
 		const tx = db.transaction(storeName, "readwrite");
@@ -115,7 +171,16 @@ export async function idbPutManyToStore(
 			resolve();
 		};
 		tx.onerror = () => reject(tx.error);
+		tx.onabort = () => reject(tx.error);
 	});
+}
+
+export async function idbPutManyToStore(
+	storeName: string,
+	values: unknown[],
+): Promise<void> {
+	if (values.length === 0) return;
+	await withQuotaRetry(() => idbPutManyToStoreOnce(storeName, values));
 }
 
 export async function idbDeleteFromStore(
@@ -140,5 +205,6 @@ export async function idbDeleteManyFromStore(
 			resolve();
 		};
 		tx.onerror = () => reject(tx.error);
+		tx.onabort = () => reject(tx.error);
 	});
 }

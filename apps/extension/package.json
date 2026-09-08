@@ -1,6 +1,6 @@
 {
   "name": "extension",
-  "version": "0.1.7",
+  "version": "0.1.9",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,7 +11,8 @@
     "build:watch:background": "vite build --mode background --watch",
     "build:watch:content": "vite build --mode content --watch",
     "build:watch:popup": "vite build --mode popup --watch",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test src/core/storage-quota.test.ts"
   },
   "dependencies": {
     "@repo/import": "workspace:*"

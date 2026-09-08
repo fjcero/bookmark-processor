@@ -29,7 +29,6 @@ const FORMAT_FILTERS: Array<{
 ];
 
 const SORT_FILTERS: Array<{ id: ItemSort; label: string }> = [
-	{ id: "saved", label: "Saved" },
 	{ id: "published", label: "Published" },
 	{ id: "imported", label: "Imported" },
 ];
