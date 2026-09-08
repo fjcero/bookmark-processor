@@ -10,14 +10,13 @@ import {
 	isUnsupportedClientDocument,
 	pendingArticleFromRaw,
 	type GraphQLArticleResult,
+	type ImportWorkerProgress,
 } from "@repo/import";
 import { clearCaptureQueue } from "@repo/import/capture/hooks-events";
-import type { CaptureEventDetail } from "@repo/import/capture/hooks-events";
 import {
 	createBackgroundStorageAdapter,
+	enqueueImportsInBackground,
 	fetchTotalInBackground,
-	seedTimelineInBackground,
-	syncInBackground,
 	type TimelineProgress,
 } from "./background-client";
 import { loadSettings } from "./storage";
@@ -37,7 +36,6 @@ import {
 import { clickTimelineRetry } from "./timeline-recovery";
 
 const SYNC_INTERVAL_MS = 1500;
-const SYNC_BATCH_SIZE = 20;
 
 function isArticlePage(): boolean {
 	if (
@@ -72,15 +70,12 @@ let syncTimer: ReturnType<typeof setTimeout> | null = null;
 let syncing = false;
 let syncQueued = false;
 let retryObserver: MutationObserver | null = null;
-let sessionCaptured = 0;
 let sessionImported = 0;
 let sessionSkipped = 0;
-let timelineSeeded = false;
-let timelineSeedInFlight = false;
 let timelineWorkerRunning = false;
-let workerCaptured = 0;
 let workerImported = 0;
 let workerSkipped = 0;
+let libraryArticlesMissing: number | null = null;
 let lastWorkerMessage = "";
 
 function reportCaptureScroll(active: boolean): void {
@@ -108,7 +103,7 @@ function applyArticleStats(stats: {
 	total: number;
 }): void {
 	if (!sidebar) return;
-	setArticleStatus(sidebar, stats);
+	setArticleStatus(sidebar, stats, libraryArticlesMissing);
 	const remaining = stats.pending + stats.fetching;
 	if (stats.fetching > 0) {
 		reportWorker(`Loading article · ${remaining} left`);
@@ -123,32 +118,28 @@ function applyArticleStats(stats: {
 
 function renderSessionProgress(): void {
 	if (!sidebar) return;
-	updateSidebarCount(sidebar, sessionCaptured, "");
+	const pending = engine?.tweetCount() ?? 0;
+	const captured = engine?.observedCount() ?? 0;
+	const synced = sessionImported + sessionSkipped;
+	updateSidebarCount(sidebar, `${captured} / ${synced}`, "Captured / synced");
 	setSyncStatus(
 		sidebar,
-		`${sessionImported} new · ${sessionSkipped} existing`,
+		`${sessionImported} new · ${sessionSkipped} skipped · ${pending} pending`,
 	);
 }
 
 function trackPendingCount(count: number): void {
-	// Restored unsynced rows count toward this session; subsequent observations
-	// are tracked separately even when the row was already synced before.
-	sessionCaptured = Math.max(sessionCaptured, count);
 	renderSessionProgress();
 }
 
 function applyTimelineProgress(progress: TimelineProgress): void {
 	timelineWorkerRunning = progress.running;
-	if (progress.captured > workerCaptured) {
-		sessionCaptured += progress.captured - workerCaptured;
-	}
 	if (progress.imported > workerImported) {
 		sessionImported += progress.imported - workerImported;
 	}
 	if (progress.skipped > workerSkipped) {
 		sessionSkipped += progress.skipped - workerSkipped;
 	}
-	workerCaptured = Math.max(workerCaptured, progress.captured);
 	workerImported = Math.max(workerImported, progress.imported);
 	workerSkipped = Math.max(workerSkipped, progress.skipped);
 	if (sidebar && progress.libraryTotal != null) {
@@ -161,41 +152,42 @@ function applyTimelineProgress(progress: TimelineProgress): void {
 		renderSessionProgress();
 		reportWorker(
 			progress.running
-				? `History page ${progress.pages} · ${progress.captured} loaded`
+				? `History page ${progress.pages} · ${progress.imported + progress.skipped} synced`
 				: "History pagination complete",
 			progress.running ? "active" : "success",
 		);
 	}
 }
 
-function offerTimelineSeed(detail: CaptureEventDetail): void {
-	if (
-		!engine ||
-		engine.source !== "history" ||
-		timelineSeeded ||
-		timelineSeedInFlight ||
-		!detail.request ||
-		!detail.url.includes("/graphql/")
-	) {
+function applyImportProgress(progress: ImportWorkerProgress): void {
+	if (progress.completedIds?.length && engine) {
+		engine.removeSynced(progress.completedIds);
+		clearCaptureQueue();
+	}
+	sessionImported += progress.importedDelta ?? 0;
+	sessionSkipped += progress.skippedDelta ?? 0;
+	if (sidebar && progress.libraryTotal != null) {
+		updateServerTotal(sidebar, progress.libraryTotal);
+	}
+	renderSessionProgress();
+	if (!sidebar) return;
+
+	if (progress.lastError) {
+		setSyncRetryVisible(sidebar, true);
+		reportWorker(`Import paused · ${progress.lastError}`, "error");
 		return;
 	}
-	timelineSeedInFlight = true;
-	void seedTimelineInBackground(detail, engine.source, location.href)
-		.then((result) => {
-			timelineSeeded = result.accepted;
-			if (result.accepted && autoScrolling) {
-				autoScrolling = false;
-				reportCaptureScroll(false);
-				stopRetryWatcher();
-				if (sidebar) setAutoScrollUi(sidebar, "idle");
-			}
-		})
-		.catch(() => {
-			/* keep DOM scrolling available as fallback */
-		})
-		.finally(() => {
-			timelineSeedInFlight = false;
-		});
+	setSyncRetryVisible(sidebar, false);
+	if (progress.processingId) {
+		reportWorker(`Importing 1 item · ${progress.pending} queued`);
+	} else if (progress.pending > 0) {
+		reportWorker(`${progress.pending} items queued in background`);
+	} else if ((progress.importedDelta ?? 0) + (progress.skippedDelta ?? 0) > 0) {
+		reportWorker(
+			`Synced · ${progress.importedDelta ?? 0} new · ${progress.skippedDelta ?? 0} skipped`,
+			"success",
+		);
+	}
 }
 
 function enqueueCapturedArticles(): void {
@@ -427,6 +419,7 @@ async function recoverTimeline(): Promise<boolean> {
 
 async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
 	if (!engine || !sidebar) return;
+	let workerPaused = false;
 	if (syncing) {
 		syncQueued = true;
 		return;
@@ -452,19 +445,6 @@ async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
 		return;
 	}
 
-	const batchEntries = Object.entries(pendingPayload.tweets).slice(
-		0,
-		SYNC_BATCH_SIZE,
-	);
-	const payload = {
-		...pendingPayload,
-		stats: {
-			...pendingPayload.stats,
-			tweetCount: batchEntries.length,
-		},
-		tweets: Object.fromEntries(batchEntries),
-	};
-
 	if (!settings.serverUrl) {
 		if (opts.manual) showToast("Set server URL in extension popup");
 		return;
@@ -473,30 +453,30 @@ async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
 	clearSyncTimer();
 	syncing = true;
 	setSyncRetryVisible(sidebar, false);
-	reportWorker(`Uploading ${Object.keys(payload.tweets).length} items`);
+	reportWorker(`Queueing ${pendingCount} items for background import`);
 
 	try {
-		const result = await syncInBackground(payload, settings.serverUrl);
-		engine.removeSynced(Object.keys(payload.tweets));
-		clearCaptureQueue();
-		sessionImported += result.imported;
-		sessionSkipped += result.skipped;
+		const progress = await enqueueImportsInBackground(
+			pendingPayload,
+			settings.serverUrl,
+		);
+		if (progress.lastError) {
+			workerPaused = true;
+			setSyncStatus(sidebar, "Background import paused — retrying");
+			reportWorker(`Import paused · ${progress.lastError}`, "error");
+			setSyncRetryVisible(sidebar, true);
+			return;
+		}
 		renderSessionProgress();
-		updateServerTotal(sidebar, result.total);
-
-		const msg = `${result.imported} new · ${result.skipped} existing`;
-		reportWorker(`Uploaded · ${msg}`, "success");
+		reportWorker(
+			progress.pending > 0
+				? `${progress.pending} items queued in background`
+				: "Background import complete",
+			progress.pending > 0 ? "active" : "success",
+		);
 		setSyncRetryVisible(sidebar, false);
-		if (opts.manual || result.imported > 0) {
-			showToast(msg);
-		}
-		enqueueCapturedArticles();
-		try {
-			void chrome.runtime.sendMessage({ type: "bp-refresh-articles" });
-		} catch {
-			/* ignore */
-		}
 	} catch (err) {
+		workerPaused = true;
 		const msg = err instanceof Error ? err.message : "Sync failed";
 		setSyncStatus(sidebar, "Sync failed — click Retry or wait");
 		reportWorker(`Upload failed · ${msg}`, "error");
@@ -511,7 +491,7 @@ async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
 		}
 	} finally {
 		syncing = false;
-		if (syncQueued || engine.tweetCount() > 0) {
+		if (!workerPaused && (syncQueued || engine.tweetCount() > 0)) {
 			syncQueued = false;
 			scheduleAutoSync();
 		}
@@ -521,8 +501,8 @@ async function performSync(opts: { auto?: boolean; manual?: boolean } = {}) {
 function handleAutoScroll(): void {
 	if (!engine || !sidebar) return;
 	if (timelineWorkerRunning) {
-		showToast("History is loading in the background");
-		return;
+		timelineWorkerRunning = false;
+		void chrome.runtime.sendMessage({ type: "bp-timeline-cancel" });
 	}
 	if (autoScrolling) {
 		autoScrolling = false;
@@ -546,7 +526,11 @@ function handleAutoScroll(): void {
 					autoScrolling = false;
 					reportCaptureScroll(false);
 					stopRetryWatcher();
-					setAutoScrollUi(sidebar, "done", sessionCaptured);
+					setAutoScrollUi(
+						sidebar,
+						"done",
+						engine.observedCount(),
+					);
 					void performSync({ auto: true });
 				}
 			},
@@ -563,7 +547,7 @@ function mountUi(): void {
 	if (uiMounted || !engine) return;
 
 	const label = engine.label;
-	const count = sessionCaptured;
+	const count = engine.tweetCount();
 
 	stopSidebarRetry = mountSidebarUiWithRetry(
 		{
@@ -596,13 +580,14 @@ async function startCapture(): Promise<void> {
 		showToast("Capture already active");
 		return;
 	}
+	// Auto-scroll is the capture mechanism; discard any legacy background
+	// pagination job so it cannot stop or compete with the visible scroll.
+	void chrome.runtime.sendMessage({ type: "bp-timeline-cancel" });
 
 	engine = new CaptureEngine({
 		storage: createBackgroundStorageAdapter(),
 		storeResponses: false,
-		onCapture: offerTimelineSeed,
 		onTweetObserved: () => {
-			sessionCaptured += 1;
 			renderSessionProgress();
 		},
 		onCountChange: (count) => {
@@ -645,15 +630,12 @@ async function stopCapture(): Promise<void> {
 	reportCaptureScroll(false);
 	syncing = false;
 	syncQueued = false;
-	sessionCaptured = 0;
 	sessionImported = 0;
 	sessionSkipped = 0;
-	timelineSeeded = false;
-	timelineSeedInFlight = false;
 	timelineWorkerRunning = false;
-	workerCaptured = 0;
 	workerImported = 0;
 	workerSkipped = 0;
+	libraryArticlesMissing = null;
 	lastWorkerMessage = "";
 	showToast("Capture stopped");
 }
@@ -679,8 +661,22 @@ function registerMessageListener(): void {
 				if (message.stats) applyArticleStats(message.stats);
 				return false;
 			}
+			if (message?.type === "bp-library-article-count") {
+				libraryArticlesMissing = Number(message.count);
+				void chrome.runtime
+					.sendMessage({ type: "bp-article-stats-request" })
+					.then((response) => {
+						const stats = response?.result?.stats ?? response?.stats;
+						if (stats) applyArticleStats(stats);
+					});
+				return false;
+			}
 			if (message?.type === "bp-timeline-progress") {
 				if (message.progress) applyTimelineProgress(message.progress);
+				return false;
+			}
+			if (message?.type === "bp-import-progress") {
+				if (message.progress) applyImportProgress(message.progress);
 				return false;
 			}
 			if (message?.type === "bp-capture-status") {

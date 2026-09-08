@@ -15,6 +15,14 @@ import type { ImportPrefs, ItemSort, ViewMode } from "@/lib/import-prefs";
 import { type ClientItem } from "@/lib/item-dto";
 import ActivityHeatmap from "./activity-heatmap";
 import ItemSearchBar, { type ItemSearchState } from "./item-search-bar";
+import {
+	ArticleBody,
+	articleContentHasInlineMedia,
+} from "./article-body";
+import { SyncActivity } from "./sync-activity";
+import { ImportQueuePanel } from "./import-queue-panel";
+import type { SyncStatusResponse } from "@repo/import";
+import Link from "next/link";
 
 export interface StageCounts {
 	done: number;
@@ -237,12 +245,14 @@ export default function HomeClient({
 	const router = useRouter();
 	const pathname = usePathname();
 	const selectedId = pathname.match(/^\/items\/([^/]+)$/)?.[1] ?? null;
+	const onQueuePage = pathname === "/queue";
 	const [fetchedSelected, setFetchedSelected] = useState<ClientItem | null>(
 		null,
 	);
 	const [search, setSearch] = useState<ItemSearchState>({ q: "" });
 	const [resultTotal, setResultTotal] = useState<number | null>(null);
 	const [searching, setSearching] = useState(false);
+	const [syncStatus, setSyncStatus] = useState<SyncStatusResponse | null>(null);
 	const fileRef = useRef<HTMLInputElement>(null);
 	const importPopoverRef = useRef<HTMLDivElement>(null);
 	const loadMoreRef = useRef<HTMLDivElement>(null);
@@ -288,7 +298,7 @@ export default function HomeClient({
 	}, [hasMore, items, search, sort]);
 
 	const refresh = useCallback(async () => {
-		const [statsRes, itemsRes, activityRes] = await Promise.all([
+		const [statsRes, itemsRes, activityRes, syncRes] = await Promise.all([
 			fetch("/api/stats"),
 			fetch(
 				buildItemsQuery({
@@ -299,9 +309,11 @@ export default function HomeClient({
 				}),
 			),
 			fetch("/api/activity"),
+			fetch("/api/import/status"),
 		]);
 		if (statsRes.ok) setStats((await statsRes.json()) as Stats);
 		if (activityRes.ok) setActivity(await activityRes.json());
+		if (syncRes.ok) setSyncStatus((await syncRes.json()) as SyncStatusResponse);
 		if (itemsRes.ok) {
 			const data = (await itemsRes.json()) as {
 				items: ClientItem[];
@@ -312,6 +324,21 @@ export default function HomeClient({
 			setHasMore(data.items.length < data.total);
 		}
 	}, [search, sort]);
+
+	useEffect(() => {
+		let cancelled = false;
+		const load = async () => {
+			const res = await fetch("/api/import/status");
+			if (!res.ok || cancelled) return;
+			setSyncStatus((await res.json()) as SyncStatusResponse);
+		};
+		void load();
+		const timer = window.setInterval(() => void load(), 10_000);
+		return () => {
+			cancelled = true;
+			window.clearInterval(timer);
+		};
+	}, []);
 
 	useEffect(() => {
 		const timer = window.setTimeout(() => {
@@ -428,35 +455,6 @@ export default function HomeClient({
 			cancelled = true;
 		};
 	}, [fetchedSelected?.id, items, router, selectedId]);
-
-	useEffect(() => {
-		if (!selectedId) return;
-		function onKey(event: KeyboardEvent) {
-			const target = event.target as HTMLElement | null;
-			const typing =
-				target &&
-				(target.tagName === "INPUT" ||
-					target.tagName === "TEXTAREA" ||
-					target.tagName === "SELECT" ||
-					target.isContentEditable);
-			if (event.key === "Escape") {
-				event.preventDefault();
-				closeSheet();
-				return;
-			}
-			if (typing || event.metaKey || event.ctrlKey || event.altKey) return;
-			const key = event.key.toLowerCase();
-			if (event.key === "ArrowDown" || key === "j") {
-				event.preventDefault();
-				moveSelection(1);
-			} else if (event.key === "ArrowUp" || key === "k") {
-				event.preventDefault();
-				moveSelection(-1);
-			}
-		}
-		window.addEventListener("keydown", onKey);
-		return () => window.removeEventListener("keydown", onKey);
-	}, [selectedId, closeSheet, moveSelection]);
 
 	useEffect(() => {
 		if (!importOpen) return;
@@ -626,8 +624,47 @@ export default function HomeClient({
 		await refresh();
 	}
 
+	useEffect(() => {
+		if (!selectedId) return;
+		const activeId = selectedId;
+		function onKey(event: KeyboardEvent) {
+			const target = event.target as HTMLElement | null;
+			const typing =
+				target &&
+				(target.tagName === "INPUT" ||
+					target.tagName === "TEXTAREA" ||
+					target.tagName === "SELECT" ||
+					target.isContentEditable);
+			if (event.key === "Escape") {
+				event.preventDefault();
+				closeSheet();
+				return;
+			}
+			if (
+				(event.metaKey || event.ctrlKey) &&
+				(event.key === "Backspace" || event.key === "Delete")
+			) {
+				if (typing) return;
+				event.preventDefault();
+				void deleteItem(activeId);
+				return;
+			}
+			if (typing || event.metaKey || event.ctrlKey || event.altKey) return;
+			const key = event.key.toLowerCase();
+			if (event.key === "ArrowDown" || key === "j") {
+				event.preventDefault();
+				moveSelection(1);
+			} else if (event.key === "ArrowUp" || key === "k") {
+				event.preventDefault();
+				moveSelection(-1);
+			}
+		}
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, [selectedId, closeSheet, moveSelection, items, router, refresh]);
+
 	return (
-		<div className={selected ? "lg:pr-[28rem]" : undefined}>
+		<div>
 			<main className="mx-auto max-w-6xl px-6 py-10">
 				<header className="mb-10 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
 					<div>
@@ -642,6 +679,21 @@ export default function HomeClient({
 						</p>
 					</div>
 					<div className="flex shrink-0 items-center gap-2 self-start">
+						<Link
+							href="/queue"
+							className={`relative rounded-md border px-3 py-2 text-sm hover:bg-zinc-900 ${
+								onQueuePage
+									? "border-violet-500/60 text-violet-200"
+									: "border-zinc-700 text-zinc-200 hover:border-zinc-500"
+							}`}
+						>
+							Queue
+							{(syncStatus?.library.importQueue.pending ?? 0) > 0 && (
+								<span className="absolute -top-1.5 -right-1.5 min-w-[1.1rem] rounded-full bg-amber-400 px-1 text-center font-mono text-[10px] font-semibold text-zinc-950">
+									{syncStatus!.library.importQueue.pending}
+								</span>
+							)}
+						</Link>
 						<div className="relative" ref={importPopoverRef}>
 							<button
 								type="button"
@@ -764,6 +816,13 @@ export default function HomeClient({
 					</p>
 				) : null}
 
+				{onQueuePage ? (
+					<>
+						<SyncActivity status={syncStatus} />
+						<ImportQueuePanel />
+					</>
+				) : (
+					<>
 				<ActivityHeatmap series={activity} />
 
 				<ItemSearchBar
@@ -810,7 +869,7 @@ export default function HomeClient({
 					</p>
 				) : view === "grid" ? (
 					<section
-						className={`grid gap-3 sm:grid-cols-2 ${selected ? "lg:grid-cols-2" : "lg:grid-cols-3"}`}
+						className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"
 					>
 						{items.map((item) => (
 							<article
@@ -837,24 +896,6 @@ export default function HomeClient({
 								<div className="mt-3 flex flex-wrap gap-1">
 									<CategoryBadges item={item} />
 								</div>
-								<div className="mt-3 flex items-center justify-between">
-									<span className="font-mono text-xs">
-										<StageDot done={Boolean(item.entities)} label="E" />
-										<StageDot done={Boolean(item.understanding)} label="U" />
-										<StageDot done={Boolean(item.categorizedAt)} label="C" />
-									</span>
-									{itemUrl(item) && (
-										<a
-											href={itemUrl(item) ?? "#"}
-											target="_blank"
-											rel="noreferrer"
-											onClick={(e) => e.stopPropagation()}
-											className="text-xs text-zinc-500 hover:text-zinc-300"
-										>
-											Open
-										</a>
-									)}
-								</div>
 							</article>
 						))}
 					</section>
@@ -866,7 +907,6 @@ export default function HomeClient({
 									<th className="px-4 py-3 font-medium">Author</th>
 									<th className="px-4 py-3 font-medium">Type</th>
 									<th className="px-4 py-3 font-medium">Text</th>
-									<th className="px-4 py-3 font-medium">Stages</th>
 									<th className="px-4 py-3 font-medium">Categories</th>
 								</tr>
 							</thead>
@@ -903,11 +943,6 @@ export default function HomeClient({
 												compact
 											/>
 										</td>
-										<td className="px-4 py-3 font-mono text-xs">
-											<StageDot done={Boolean(item.entities)} label="E" />
-											<StageDot done={Boolean(item.understanding)} label="U" />
-											<StageDot done={Boolean(item.categorizedAt)} label="C" />
-										</td>
 										<td className="px-4 py-3">
 											<div className="flex flex-wrap gap-1">
 												<CategoryBadges item={item} />
@@ -933,6 +968,8 @@ export default function HomeClient({
 							</p>
 						)}
 					</div>
+				)}
+					</>
 				)}
 			</main>
 			{selected && (
@@ -1553,12 +1590,71 @@ function Stat({ label, value }: { label: string; value: string | number }) {
 	);
 }
 
-function StageDot({ done, label }: { done: boolean; label: string }) {
+function SheetDateStatus({
+	item,
+	contentStatus,
+	publishedDate,
+}: {
+	item: ClientItem;
+	contentStatus: string | null;
+	publishedDate: string | null;
+}) {
+	const stages = [
+		{ short: "E", label: "Entities", done: Boolean(item.entities) },
+		{ short: "U", label: "Understanding", done: Boolean(item.understanding) },
+		{ short: "C", label: "Categories", done: Boolean(item.categorizedAt) },
+	];
+	const stageLabel = stages
+		.map((stage) => `${stage.label} ${stage.done ? "complete" : "pending"}`)
+		.join(", ");
+
 	return (
-		<span className={`mr-2 ${done ? "text-emerald-400" : "text-zinc-600"}`}>
-			{label}
-			{done ? "✓" : "·"}
-		</span>
+		<div
+			tabIndex={0}
+			aria-label={`${contentStatus ? `${contentStatus}. ` : ""}${stageLabel}`}
+			className="group relative ml-auto rounded-sm text-right outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+		>
+			{publishedDate ? (
+				<time
+					dateTime={item.publishedAt ?? undefined}
+					className="cursor-default font-mono text-xs text-zinc-500 decoration-zinc-700 underline-offset-4 group-hover:underline"
+				>
+					{publishedDate}
+				</time>
+			) : (
+				<span className="cursor-default font-mono text-[11px] text-zinc-500">
+					Status
+				</span>
+			)}
+			<div
+				role="tooltip"
+				className="pointer-events-none absolute top-full right-0 z-20 mt-2 w-48 translate-y-1 rounded-lg border border-zinc-700 bg-zinc-900 p-2.5 opacity-0 shadow-xl transition group-hover:translate-y-0 group-hover:opacity-100 group-focus:translate-y-0 group-focus:opacity-100"
+			>
+				{contentStatus && (
+					<div className="mb-1.5 border-b border-zinc-700 pb-2 text-left font-mono text-[11px] text-zinc-300">
+						{contentStatus}
+					</div>
+				)}
+				{stages.map((stage) => (
+					<div
+						key={stage.short}
+						className="flex items-center gap-2 py-1 font-mono text-[11px]"
+					>
+						<span
+							className={
+								stage.done ? "text-emerald-400" : "text-zinc-600"
+							}
+						>
+							{stage.short}
+						</span>
+						<span className="text-zinc-300">{stage.label}</span>
+						<span className="ml-auto text-zinc-500">
+							{stage.done ? "Done" : "Pending"}
+						</span>
+					</div>
+				))}
+			</div>
+		</div>
 	);
 }
 
@@ -1656,8 +1752,12 @@ function ItemSheet({
 	const postUrl = itemUrl(item);
 	const isArticle = item.contentType === "article";
 	const article = isArticle ? articleDisplay(item) : null;
-	const openLabel = isArticle ? "View article on X" : "View original post on X";
 	const footerLabel = isArticle ? "Open article on X" : "Open on X";
+	const contentStatus = item.articleRefetching
+		? "Refetch queued"
+		: isArticle && !item.articleHydrated
+			? "Full text pending"
+			: null;
 
 	return (
 		<>
@@ -1665,13 +1765,13 @@ function ItemSheet({
 				type="button"
 				aria-label="Close details"
 				onClick={onClose}
-				className="fixed inset-0 z-40 bg-black/50 lg:hidden"
+				className="fixed inset-0 z-40 bg-black/40"
 			/>
 			<aside
 				role="dialog"
 				aria-modal="true"
 				aria-labelledby="item-sheet-title"
-				className="fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col border-l border-zinc-800 bg-zinc-950 shadow-2xl"
+				className="fixed inset-3 z-50 flex flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl ring-1 ring-white/5 sm:inset-y-4 sm:right-4 sm:left-auto sm:w-[min(100vw-2rem,48rem)]"
 			>
 				<header className="flex items-center gap-2 border-b border-zinc-800 px-4 py-3">
 					<p
@@ -1721,81 +1821,55 @@ function ItemSheet({
 				</header>
 
 				<div className="min-h-0 flex-1 overflow-y-auto px-4 py-5">
-					<Author item={item} linkProfile />
-					<div className="mt-2">
-						<TypeBadges item={item} />
+					<div className="flex items-start gap-4">
+						<Author item={item} linkProfile />
+						<SheetDateStatus
+							item={item}
+							contentStatus={contentStatus}
+							publishedDate={publishedDate}
+						/>
 					</div>
-					{publishedDate && (
-						<p className="mt-2 font-mono text-xs text-zinc-500">
-							{postUrl ? (
-								<a
-									href={postUrl}
-									target="_blank"
-									rel="noreferrer"
-									className="text-violet-300 underline decoration-violet-300/40 hover:text-violet-200"
-								>
-									{publishedDate}
-								</a>
-							) : (
-								publishedDate
-							)}
-						</p>
-					)}
-					{postUrl && (
-						<a
-							href={postUrl}
-							target="_blank"
-							rel="noreferrer"
-							className="mt-2 inline-block text-xs text-violet-300 underline decoration-violet-300/40 hover:text-violet-200"
-						>
-							{openLabel}
-						</a>
-					)}
 					{article ? (
-						<div className="mt-4">
-							<h2 className="text-lg font-medium tracking-tight text-zinc-100">
-								{article.title || "(untitled)"}
-							</h2>
-							{item.articleRefetching ? (
-								<p className="mt-2 font-mono text-[11px] text-violet-400/80">
-									Refetching from X
-								</p>
-							) : !item.articleHydrated ? (
-								<p className="mt-2 font-mono text-[11px] text-zinc-600">
-									Full text pending
-								</p>
-							) : null}
-							{article.rest ? (
-								<p className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-zinc-200">
-									<LinkifiedText text={article.rest} />
-								</p>
-							) : null}
+						<div className="mt-5">
+							<div className="flex items-start justify-between gap-4">
+								<h2 className="min-w-0 flex-1 text-lg font-medium tracking-tight text-zinc-100">
+									{article.title || "(untitled)"}
+								</h2>
+								<div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+									<TypeBadges item={item} />
+								</div>
+							</div>
+							<ArticleBody
+								content={item.articleContent}
+								fallbackText={article.rest}
+							/>
 						</div>
 					) : (
-						<p className="mt-4 whitespace-pre-wrap text-sm leading-relaxed text-zinc-200">
-							{item.text ? (
-								<LinkifiedText text={item.text} />
-							) : (
-								"(empty)"
-							)}
-						</p>
+						<div className="mt-5 flex items-start justify-between gap-4">
+							<p className="min-w-0 flex-1 whitespace-pre-wrap text-sm leading-relaxed text-zinc-200">
+								{item.text ? (
+									<LinkifiedText text={item.text} />
+								) : (
+									"(empty)"
+								)}
+							</p>
+							<div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+								<TypeBadges item={item} />
+							</div>
+						</div>
 					)}
 					{(item.embeds?.length ?? 0) > 0 && (
 						<EmbeddedTweetList embeds={item.embeds ?? []} className="mt-4" />
 					)}
-					<ItemMedia urls={item.mediaUrls} className="mt-4" />
+					{!articleContentHasInlineMedia(item.articleContent) && (
+						<ItemMedia urls={item.mediaUrls} className="mt-4" />
+					)}
 
 					{item.categories.length > 0 && (
 						<div className="mt-4 flex flex-wrap gap-1">
 							<CategoryBadges item={item} />
 						</div>
 					)}
-
-					<div className="mt-4 font-mono text-xs">
-						<StageDot done={Boolean(item.entities)} label="E" />
-						<StageDot done={Boolean(item.understanding)} label="U" />
-						<StageDot done={Boolean(item.categorizedAt)} label="C" />
-					</div>
 
 					{understanding && (
 						<SheetSection title="Understanding">

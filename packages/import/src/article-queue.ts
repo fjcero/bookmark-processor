@@ -11,7 +11,7 @@ export interface ArticleQueueItem {
 }
 
 /** Minimum quiet time between finishing one article and starting the next. */
-export const ARTICLE_GAP_MS = 90_000
+export const ARTICLE_GAP_MS = 20_000
 /** How often to poll the server when the local queue is empty. */
 export const ARTICLE_POLL_IDLE_MS = 300_000
 /** Default global pause after X returns 429. */

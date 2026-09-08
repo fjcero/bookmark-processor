@@ -12,7 +12,7 @@ export type {
   PostFormat,
 } from './types'
 export { X_SOURCE } from './types'
-export { parseExportV2 } from './parse'
+export { parseExportV2, isImportableTweet } from './parse'
 export {
   SORT_INDEX_KEY,
   applySortIndexes,
@@ -22,6 +22,12 @@ export {
   sortIndexFromTweet,
   stampSortIndex,
 } from './sort-index'
+export {
+  parseArticleContent,
+  parseArticleContentFromRaw,
+  type ArticleContentNode,
+  type ParsedArticleContent,
+} from './article-content'
 export {
   ARTICLE_RAW_KEY,
   articleCoverUrl,
@@ -93,3 +99,16 @@ export {
   type ArticleQueueItem,
   type ArticleQueueStatus,
 } from './article-queue'
+export type {
+  ArticleQueueCounts,
+  ArticleQueueEntry,
+  ExtensionStatusReport,
+  ImportQueueCounts,
+  ImportQueueItemDto,
+  ImportQueueStatus,
+  ImportWorkerProgress,
+  LibrarySyncQueue,
+  SyncRevocation,
+  SyncStatusResponse,
+} from './sync-status'
+export { EXTENSION_ONLINE_MS } from './sync-status'

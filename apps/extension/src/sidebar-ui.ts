@@ -142,7 +142,7 @@ export function buildSidebarPanel(opts: {
 	statEl.textContent = String(opts.count);
 
 	const pendingLabel = document.createElement("span");
-	pendingLabel.textContent = "Captured";
+	pendingLabel.textContent = "Pending sync";
 
 	const pendingMetric = document.createElement("div");
 	pendingMetric.className = "bp-sidebar-card__metric";
@@ -226,10 +226,12 @@ export function buildSidebarPanel(opts: {
 
 export function updateSidebarCount(
 	refs: SidebarUiRefs,
-	count: number,
-	_label: string,
+	count: number | string,
+	label = "Pending sync",
 ): void {
 	refs.statEl.textContent = String(count);
+	const labelEl = refs.statEl.nextElementSibling;
+	if (labelEl instanceof HTMLElement) labelEl.textContent = label;
 }
 
 export function updateServerTotal(
@@ -250,9 +252,13 @@ export function setSyncStatus(refs: SidebarUiRefs, message: string): void {
 export function setArticleStatus(
 	refs: SidebarUiRefs,
 	stats: { pending: number; fetching: number; ok: number; failed: number; total: number },
+	libraryMissing: number | null = null,
 ): void {
 	const remaining = stats.pending + stats.fetching;
-	refs.articleEl.textContent = `${remaining.toLocaleString()} articles queued`;
+	refs.articleEl.textContent =
+		libraryMissing != null
+			? `${remaining.toLocaleString()} active · ${libraryMissing.toLocaleString()} missing in library`
+			: `${remaining.toLocaleString()} articles active`;
 }
 
 export function trackWorkerActivity(

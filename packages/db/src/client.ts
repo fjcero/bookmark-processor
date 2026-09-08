@@ -76,6 +76,33 @@ function migrateItems(database: InstanceType<typeof Database>): void {
       AND text = json_extract(raw_json, '$.article.article_results.result.title')
       AND json_extract(raw_json, '$.article.article_results.result.preview_text') IS NOT NULL
   `)
+  migrateImportQueue(database)
+}
+
+function migrateImportQueue(database: InstanceType<typeof Database>): void {
+  const table = database
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'import_queue'`)
+    .get() as { name?: string } | undefined
+  if (!table) {
+    database.exec(`
+      CREATE TABLE import_queue (
+        id TEXT PRIMARY KEY NOT NULL,
+        source TEXT NOT NULL DEFAULT 'x',
+        kind TEXT NOT NULL DEFAULT 'bookmark',
+        external_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        origin TEXT NOT NULL,
+        payload_json TEXT,
+        last_error TEXT,
+        item_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX import_queue_source_external_unique ON import_queue(source, external_id);
+      CREATE INDEX import_queue_status_idx ON import_queue(status);
+      CREATE INDEX import_queue_created_at_idx ON import_queue(created_at);
+    `)
+  }
 }
 
 export const db = drizzle(sqlite, { schema })

@@ -58,6 +58,17 @@ function isTweetObject(value: unknown): value is GraphQLTweet {
   return obj.article != null
 }
 
+/** True when parseExportV2 would emit a library item for this tweet. */
+export function isImportableTweet(value: unknown): boolean {
+  if (!isTweetObject(value)) return false
+  const unwrapped = unwrapTweet(value as GraphQLTweet)
+  if (!unwrapped) return false
+  const embeddedUser = unwrapped.core?.user_results?.result
+  const authorId = embeddedUser?.rest_id ?? unwrapped.legacy?.user_id_str ?? ''
+  if (authorId) return true
+  return contentTypeOfTweet(unwrapped) === 'article'
+}
+
 function isUserObject(value: unknown): value is GraphQLUser {
   const obj = asRecord(value)
   if (!obj) return false

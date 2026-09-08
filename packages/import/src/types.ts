@@ -101,7 +101,10 @@ export interface GraphQLArticleResult {
     entityMap?: unknown
   }
   cover_media?: { media_info?: { original_img_url?: string } }
-  media_entities?: Array<{ media_info?: { original_img_url?: string } }>
+  media_entities?: Array<{
+    media_id?: string
+    media_info?: { original_img_url?: string }
+  }>
   metadata?: { first_published_at_secs?: number }
   extracted_html?: string
   hydration_source?: "graphql" | "html"

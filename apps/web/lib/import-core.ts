@@ -16,6 +16,10 @@ import {
 } from "@repo/import";
 import { db, imports, items, users } from "@repo/db";
 import { createId } from "@/lib/ids";
+import {
+	markImportQueueImporting,
+	resolveImportQueueForExternalIds,
+} from "@/lib/import-queue";
 
 export interface ImportResult {
 	filename: string;
@@ -85,6 +89,7 @@ export async function importExportJson(
 
 	const externalIds = parsed.items.map((t) => t.id);
 	const source = parsed.items[0]?.source ?? "x";
+	await markImportQueueImporting(source, externalIds);
 	const existingItems =
 		externalIds.length > 0
 			? await db
@@ -290,6 +295,17 @@ export async function importExportJson(
 		usersSkipped,
 		itemsSkipped,
 	});
+
+	const importedExternalIds = new Set([
+		...newItems.map((item) => item.id),
+		...kindOnly.map((item) => item.id),
+		...articleUpdates.map((item) => item.id),
+	]);
+	const queueOutcomes = parsed.items.map((item) => ({
+		externalId: item.id,
+		status: importedExternalIds.has(item.id) ? "imported" as const : "skipped" as const,
+	}));
+	await resolveImportQueueForExternalIds(source, queueOutcomes);
 
 	return {
 		filename,

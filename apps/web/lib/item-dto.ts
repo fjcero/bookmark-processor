@@ -1,4 +1,8 @@
-import type { ContentType, PostFormat } from "@repo/import";
+import type {
+	ContentType,
+	ParsedArticleContent,
+	PostFormat,
+} from "@repo/import";
 import type { EmbeddedTweet } from "./embeds";
 import type { ItemRow } from "./queries";
 
@@ -14,6 +18,7 @@ export interface ClientItem {
 	articleRefetching?: boolean;
 	articleTitle?: string | null;
 	articlePreview?: string | null;
+	articleContent?: ParsedArticleContent | null;
 	url: string | null;
 	publishedAt: string | null;
 	importedAt: string;
@@ -47,6 +52,7 @@ export function toClientItem(item: ItemRow): ClientItem {
 		articleRefetching: item.articleRefetching,
 		articleTitle: item.articleTitle,
 		articlePreview: item.articlePreview,
+		articleContent: item.articleContent,
 		url: item.url,
 		publishedAt: item.publishedAt?.toISOString() ?? null,
 		importedAt: item.importedAt.toISOString(),

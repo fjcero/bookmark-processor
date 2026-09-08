@@ -16,7 +16,10 @@ export interface GraphQLArticleResult {
   plain_text?: string
   plaintext?: string
   cover_media?: { media_info?: { original_img_url?: string } }
-  media_entities?: Array<{ media_info?: { original_img_url?: string } }>
+  media_entities?: Array<{
+    media_id?: string
+    media_info?: { original_img_url?: string }
+  }>
   metadata?: { first_published_at_secs?: number }
   /** Full article markup scraped from the X page when GraphQL has no body. */
   extracted_html?: string

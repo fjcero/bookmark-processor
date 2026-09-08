@@ -161,10 +161,14 @@ export function installCaptureHooks(onData: CaptureCallback): () => void {
 	) {
 		const xhr = this;
 		const meta = xhrMeta.get(xhr) ?? { method: "GET", url: "" };
+		const requestBody = typeof body === "string" ? body : undefined;
 		if (isApiUrl(meta.url)) {
 			xhr.addEventListener("load", function () {
 				try {
-					onData(JSON.parse(xhr.responseText), meta.url, meta.method);
+					onData(JSON.parse(xhr.responseText), meta.url, meta.method, {
+						headers: {},
+						body: requestBody,
+					});
 				} catch {
 					/* ignore */
 				}

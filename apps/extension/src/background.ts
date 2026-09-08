@@ -46,6 +46,14 @@ import {
 } from "./article-queue";
 import { idbDelete, idbGet, idbSet } from "./idb";
 import {
+	drainImportQueue,
+	enqueueImportPayload,
+	IMPORT_QUEUE_ALARM,
+	importWorkerProgress,
+	loadImportWorkerState,
+	setImportWorkerProgressListener,
+} from "./import-worker";
+import {
 	createArticleRequestTemplate,
 	requestForArticle,
 	type ArticleRequestTemplate,
@@ -58,10 +66,16 @@ import {
 	requestForCursor,
 	type TimelineJob,
 } from "./timeline-pagination";
+import {
+	applySyncRevocations,
+	buildExtensionStatusReport,
+	postSyncStatus,
+} from "./sync-status";
 
 const CAPTURE_KEY = "capture";
 const PENDING_UPLOAD_KEY = "pending-upload";
 const SYNC_RETRY_ALARM = "bp-sync-retry";
+const SYNC_STATUS_ALARM = "bp-sync-status";
 const LEGACY_STORAGE_KEY = "x-export-v2-state";
 const ARTICLE_TABS_KEY = "article-tabs";
 const ARTICLE_WORKER_TAB_KEY = "article-worker-tab";
@@ -85,10 +99,75 @@ const ARTICLE_TAB_LOAD_MS = 30_000;
 let bootstrapped = false;
 let hydrating = false;
 let timelineRunning = false;
+let timelineCancelled = false;
 let tabEnsureInFlight: Promise<number | null> | null = null;
 let hydrationChain: Promise<void> = Promise.resolve();
 /** Bookmarks tab is auto-scrolling; avoid opening article tabs in the same window. */
 let captureScrollActive = false;
+let statusReportTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function broadcastLibraryArticleCount(count: number): Promise<void> {
+	const tabs = await chrome.tabs.query({
+		url: ["https://x.com/*", "https://twitter.com/*"],
+	});
+	await Promise.all(
+		tabs
+			.filter((tab) => tab.id != null)
+			.map((tab) =>
+				chrome.tabs
+					.sendMessage(tab.id!, {
+						type: "bp-library-article-count",
+						count,
+					})
+					.catch(() => {
+						/* no content script */
+					}),
+			),
+	);
+}
+
+async function syncWithServer(lastError?: string): Promise<void> {
+	const settings = await loadSettings();
+	if (settings.mode !== "api" || !settings.serverUrl) return;
+
+	const timeline = await idbGet<TimelineJob>(TIMELINE_JOB_KEY);
+	const queue = await loadArticleQueue();
+	const importWorker = await loadImportWorkerState();
+	const report = await buildExtensionStatusReport({
+		articles: articleQueueStats(queue),
+		articleQueue: queue
+			.filter((item) => item.status !== "ok")
+			.slice(0, 100),
+		importWorker: importWorkerProgress(importWorker),
+		timelineRunning,
+		timelineCaptured: timeline?.captured,
+		captureScrollActive,
+		lastError,
+	});
+
+	const response = await postSyncStatus(settings.serverUrl, report);
+	if (!response) return;
+	await broadcastLibraryArticleCount(
+		response.library.articlesNeedingBody,
+	);
+
+	const acked = await applySyncRevocations(response.revocations);
+	if (acked.length > 0) {
+		await postSyncStatus(settings.serverUrl, report, acked);
+	}
+}
+
+function scheduleSyncStatusPush(lastError?: string): void {
+	if (statusReportTimer) return;
+	statusReportTimer = setTimeout(() => {
+		statusReportTimer = null;
+		void syncWithServer(lastError);
+	}, 3000);
+}
+
+setImportWorkerProgressListener((progress) => {
+	scheduleSyncStatusPush(progress.lastError);
+});
 
 async function bootstrapArticles(): Promise<void> {
 	if (bootstrapped) return;
@@ -96,6 +175,7 @@ async function bootstrapArticles(): Promise<void> {
 	await recoverInterruptedArticles();
 	await ingestPendingFromServer();
 	await scheduleNext(5_000);
+	void syncWithServer();
 }
 
 function queueHydration(): void {
@@ -110,6 +190,8 @@ chrome.runtime.onInstalled.addListener(() => {
 	chrome.storage.local.remove(LEGACY_STORAGE_KEY).catch(() => {
 		/* ignore */
 	});
+	void chrome.alarms.create(SYNC_STATUS_ALARM, { periodInMinutes: 1 });
+	void drainImportQueue();
 	void bootstrapArticles();
 });
 
@@ -132,9 +214,11 @@ async function syncPayload(input: {
 		await removeSyncedFromCapture(input.payload);
 		await idbDelete(PENDING_UPLOAD_KEY);
 		await chrome.alarms.clear(SYNC_RETRY_ALARM);
+		scheduleSyncStatusPush();
 		return result;
 	} catch (err) {
 		await chrome.alarms.create(SYNC_RETRY_ALARM, { delayInMinutes: 1 });
+		scheduleSyncStatusPush(err instanceof Error ? err.message : "Sync failed");
 		throw err;
 	}
 }
@@ -366,6 +450,7 @@ async function broadcastStats(): Promise<void> {
 	} catch {
 		/* no listeners */
 	}
+	scheduleSyncStatusPush();
 }
 
 async function broadcastTimelineProgress(
@@ -422,6 +507,7 @@ async function enqueueArticlesFromTweets(
 async function runTimelinePages(): Promise<void> {
 	if (timelineRunning) return;
 	timelineRunning = true;
+	timelineCancelled = false;
 	try {
 		let job = await idbGet<TimelineJob>(TIMELINE_JOB_KEY);
 		if (!job) return;
@@ -434,6 +520,7 @@ async function runTimelinePages(): Promise<void> {
 		if (settings.mode !== "api" || !settings.serverUrl) return;
 
 		for (let page = 0; page < TIMELINE_PAGES_PER_RUN; page++) {
+			if (timelineCancelled) return;
 			const replay = requestForCursor(job, job.cursor);
 			const response = await fetch(replay.url, {
 				method: job.request.method,
@@ -453,10 +540,11 @@ async function runTimelinePages(): Promise<void> {
 				const batch = Object.fromEntries(
 					entries.slice(index, index + TIMELINE_UPLOAD_BATCH),
 				);
+				const capturedAt = new Date().toISOString();
 				const result = await uploadPayload(
 					{
 						exportVersion: 2,
-						exportedAt: new Date().toISOString(),
+						exportedAt: capturedAt,
 						source: job.source,
 						origin: "x-background-pagination",
 						page: {
@@ -465,19 +553,27 @@ async function runTimelinePages(): Promise<void> {
 						},
 						stats: {
 							tweetCount: Object.keys(batch).length,
-							responseCount: 0,
+							responseCount: 1,
 						},
 						tweets: batch,
-						responses: [],
+						responses: [
+							{
+								url: replay.url,
+								method: job.request.method,
+								capturedAt,
+								data,
+							},
+						],
 					},
 					settings.serverUrl,
 				);
+				const accounted = result.imported + result.skipped;
 				job.imported += result.imported;
 				job.skipped += result.skipped;
 				libraryTotal = result.total;
+				job.captured += accounted;
 			}
 
-			job.captured += entries.length;
 			job.pages += 1;
 			await enqueueArticlesFromTweets(tweets);
 			const nextCursor = findBottomCursor(data);
@@ -829,6 +925,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 					payload: message.payload as ExportPayload,
 					serverUrl: String(message.serverUrl),
 				});
+			case "bp-import-enqueue": {
+				await enqueueImportPayload(
+					message.payload as ExportPayload,
+					String(message.serverUrl),
+				);
+				const state = await drainImportQueue();
+				scheduleSyncStatusPush(state.lastError);
+				return importWorkerProgress(state);
+			}
 			case "bp-fetch-total":
 				return { total: await fetchServerTotal(String(message.serverUrl)) };
 			case "bp-timeline-seed": {
@@ -907,6 +1012,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 				}
 				return { ok: true };
 			}
+			case "bp-timeline-cancel":
+				timelineCancelled = true;
+				await idbDelete(TIMELINE_JOB_KEY);
+				await chrome.alarms.clear(TIMELINE_ALARM);
+				return { ok: true };
 			case "bp-article-rate-limited": {
 				const delay = parseRetryAfterMs(
 					message.retryAfter != null ? String(message.retryAfter) : null,
@@ -941,6 +1051,12 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 		void retryPendingUpload();
 		return;
 	}
+	if (alarm.name === IMPORT_QUEUE_ALARM) {
+		void drainImportQueue().then((state) => {
+			scheduleSyncStatusPush(state.lastError);
+		});
+		return;
+	}
 	if (alarm.name.startsWith(ARTICLE_TIMEOUT_PREFIX)) {
 		const tabId = Number(alarm.name.slice(ARTICLE_TIMEOUT_PREFIX.length));
 		if (Number.isInteger(tabId)) {
@@ -954,6 +1070,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 	}
 	if (alarm.name === ALARM_NAME) {
 		queueHydration();
+		return;
+	}
+	if (alarm.name === SYNC_STATUS_ALARM) {
+		void syncWithServer();
 	}
 });
 
@@ -967,9 +1087,12 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 chrome.runtime.onStartup.addListener(() => {
+	void chrome.alarms.create(SYNC_STATUS_ALARM, { periodInMinutes: 1 });
+	void drainImportQueue();
 	void runTimelinePages();
 	void bootstrapArticles();
 });
 
 void bootstrapArticles();
+void drainImportQueue();
 void runTimelinePages();

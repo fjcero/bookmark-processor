@@ -10,16 +10,19 @@ import {
 	type SQL,
 } from "drizzle-orm";
 import { categories, db, itemCategories, items, users } from "@repo/db";
+import { articleResultFromTweet } from "@repo/import";
 import {
-	articleResultFromTweet,
 	derivePostFormat,
 	findHydratedArticleResult,
 	hasCompleteArticleRaw,
 	isPendingArticleRaw,
+	parseArticleContent,
 	pendingArticleFromRaw,
 	type ContentType,
+	type ParsedArticleContent,
 	type PostFormat,
 } from "@repo/import";
+import { recordSyncRevocation } from "@/lib/sync-status";
 import { extractEmbeds, type EmbeddedTweet } from "./embeds";
 import { mediaUrlsForItem } from "./entities";
 import {
@@ -65,6 +68,7 @@ export interface ItemRow {
 	articleRefetching: boolean;
 	articleTitle: string | null;
 	articlePreview: string | null;
+	articleContent: ParsedArticleContent | null;
 	publishedAt: Date | null;
 	url: string | null;
 	sortIndex: string | null;
@@ -293,6 +297,8 @@ function mapItemRows(
 			articleRefetching: r.hydrateRequestedAt != null,
 			articleTitle: article?.title?.trim() || null,
 			articlePreview: article?.preview_text?.trim() || null,
+			articleContent:
+				contentType === "article" ? parseArticleContent(article) : null,
 			publishedAt: r.publishedAt,
 			url: r.url,
 			sortIndex: r.sortIndex,
@@ -552,16 +558,27 @@ export async function requestArticleRefetch(opts: {
 
 export async function archiveItem(id: string): Promise<boolean> {
 	const [row] = await db
-		.select({ id: items.id, archivedAt: items.archivedAt })
+		.select({
+			id: items.id,
+			archivedAt: items.archivedAt,
+			source: items.source,
+			externalId: items.externalId,
+			rawJson: items.rawJson,
+			contentType: items.contentType,
+		})
 		.from(items)
 		.where(eq(items.id, id))
 		.limit(1);
 	if (!row) return false;
 	if (row.archivedAt) return true;
-	await db
-		.update(items)
-		.set({ archivedAt: new Date() })
-		.where(eq(items.id, id));
+	const now = new Date();
+	await db.update(items).set({ archivedAt: now }).where(eq(items.id, id));
+	await recordSyncRevocation({
+		source: row.source,
+		externalId: row.externalId,
+		rawJson: row.rawJson,
+		contentType: row.contentType,
+	});
 	return true;
 }
 

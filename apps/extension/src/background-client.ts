@@ -3,6 +3,7 @@ import type {
 	CaptureStorage,
 	ExportPayload,
 } from "@repo/import/capture/engine";
+import type { ImportWorkerProgress } from "@repo/import";
 import type { CaptureEventDetail } from "@repo/import/capture/hooks-events";
 
 interface WorkerResponse<T> {
@@ -47,6 +48,17 @@ export function syncInBackground(
 ): Promise<{ imported: number; skipped: number; total: number | null }> {
 	return request({
 		type: "bp-sync",
+		payload,
+		serverUrl,
+	});
+}
+
+export function enqueueImportsInBackground(
+	payload: ExportPayload,
+	serverUrl: string,
+): Promise<ImportWorkerProgress> {
+	return request({
+		type: "bp-import-enqueue",
 		payload,
 		serverUrl,
 	});

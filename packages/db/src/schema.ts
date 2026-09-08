@@ -100,6 +100,35 @@ export const settings = sqliteTable("settings", {
 	value: text("value").notNull(),
 });
 
+export const importQueue = sqliteTable(
+	"import_queue",
+	{
+		id: text("id").primaryKey(),
+		source: text("source").notNull().default("x"),
+		kind: text("kind").notNull().default("bookmark"),
+		externalId: text("external_id").notNull(),
+		status: text("status").notNull().default("pending"),
+		origin: text("origin").notNull(),
+		payloadJson: text("payload_json"),
+		lastError: text("last_error"),
+		itemId: text("item_id"),
+		createdAt: integer("created_at", { mode: "timestamp" })
+			.notNull()
+			.$defaultFn(() => new Date()),
+		updatedAt: integer("updated_at", { mode: "timestamp" })
+			.notNull()
+			.$defaultFn(() => new Date()),
+	},
+	(table) => [
+		uniqueIndex("import_queue_source_external_unique").on(
+			table.source,
+			table.externalId,
+		),
+		index("import_queue_status_idx").on(table.status),
+		index("import_queue_created_at_idx").on(table.createdAt),
+	],
+);
+
 export const usersRelations = relations(users, ({ many }) => ({
 	items: many(items),
 }));
@@ -128,4 +157,5 @@ export const schema = {
 	itemCategories,
 	imports,
 	settings,
+	importQueue,
 };

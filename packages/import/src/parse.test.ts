@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseExportV2 } from "./parse.ts";
+import { isImportableTweet, parseExportV2 } from "./parse.ts";
 import {
   ARTICLE_RAW_KEY,
   articleRawFrom,
@@ -141,4 +141,18 @@ test("merges a full article body out of responses onto a stub tweet", () => {
   assert.equal(parsed.items.length, 1);
   assert.equal(isPendingArticleRaw(parsed.items[0]!.rawJson, "article"), false);
   assert.match(parsed.items[0]!.text, /product is an outcome/);
+});
+
+test("isImportableTweet rejects tweet shells without author or article body", () => {
+  assert.equal(
+    isImportableTweet({ rest_id: "1234567890123456789", core: {} }),
+    false,
+  );
+  assert.equal(
+    isImportableTweet({
+      rest_id: "1234567890123456789",
+      legacy: { user_id_str: "42", full_text: "hello" },
+    }),
+    true,
+  );
 });

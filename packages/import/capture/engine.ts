@@ -17,6 +17,7 @@ import {
 	type GraphQLArticleResult,
 } from "../src/article";
 import { applySortIndexes } from "../src/sort-index";
+import { isImportableTweet } from "../src/parse.ts";
 
 export interface CaptureResponse {
 	url: string;
@@ -132,6 +133,15 @@ export class CaptureEngine {
 		return Object.keys(this.tweets).length;
 	}
 
+	/** Tweets observed this page session, including ones already uploaded. */
+	observedCount(): number {
+		return this.observedTweets.size;
+	}
+
+	getTweet(id: string): unknown | undefined {
+		return this.tweets[id];
+	}
+
 	async restore(): Promise<boolean> {
 		if (!this.storage) return false;
 		const saved = await this.storage.load();
@@ -223,8 +233,11 @@ export class CaptureEngine {
 
 	private schedulePersist(): void {
 		if (!this.storage) return;
-		this.clearPersistTimer();
+		// Fixed-window persistence: continuous scrolling must not postpone the
+		// IndexedDB write forever.
+		if (this.persistTimer) return;
 		this.persistTimer = setTimeout(() => {
+			this.persistTimer = null;
 			void this.storage
 				?.save({
 					source: this.source,
@@ -267,13 +280,7 @@ export class CaptureEngine {
 	}
 
 	private isTweetObj(o: unknown): boolean {
-		if (!o || typeof o !== "object") return false;
-		const obj = o as { rest_id?: string; legacy?: unknown; core?: unknown };
-		return (
-			typeof obj.rest_id === "string" &&
-			obj.rest_id.length > 5 &&
-			(obj.legacy != null || obj.core != null)
-		);
+		return isImportableTweet(o);
 	}
 
 	private unwrapTweet(t: unknown): unknown {
@@ -486,45 +493,43 @@ export async function runAutoScroll(
 	options: AutoScrollOptions = {},
 ): Promise<void> {
 	const scrollDelayMs = options.scrollDelayMs ?? 300;
-	let stagnant = 0;
-	let lastCount = engine.tweetCount();
+	let lastCount = engine.observedCount();
+	let lastHeight = document.documentElement.scrollHeight;
+	let lastProgressAt = Date.now();
 	while (shouldContinue()) {
 		window.scrollTo(0, document.documentElement.scrollHeight);
 		const col = document.querySelector('[data-testid="primaryColumn"]');
 		col?.scrollTo(0, col.scrollHeight);
 		await sleep(scrollDelayMs);
-		const count = engine.tweetCount();
-		if (count > lastCount) {
-			stagnant = 0;
+		const count = engine.observedCount();
+		const height = document.documentElement.scrollHeight;
+		if (count > lastCount || height > lastHeight) {
+			lastProgressAt = Date.now();
+			lastHeight = Math.max(lastHeight, height);
+			if (count === lastCount) continue;
 			lastCount = count;
 			onProgress(count, false);
-		} else {
-			stagnant++;
-			if (options.onStagnant) {
-				const recovered = await options.onStagnant();
-				if (recovered) {
-					stagnant = 0;
-					await sleep(2000);
-					continue;
-				}
-			}
-			if (stagnant >= 8) {
-				window.scrollTo(0, document.documentElement.scrollHeight);
-				await sleep(2000);
-				if (options.onStagnant) {
-					const recovered = await options.onStagnant();
-					if (recovered) {
-						stagnant = 0;
-						continue;
-					}
-				}
-				if (engine.tweetCount() === lastCount) {
-					onProgress(engine.tweetCount(), true);
-					return;
-				}
-				stagnant = 0;
-			}
+			continue;
 		}
+		if (Date.now() - lastProgressAt < 15_000) continue;
+
+		if (options.onStagnant && (await options.onStagnant())) {
+			lastProgressAt = Date.now();
+			await sleep(2000);
+			continue;
+		}
+
+		window.scrollTo(0, document.documentElement.scrollHeight);
+		await sleep(3000);
+		const finalCount = engine.observedCount();
+		const finalHeight = document.documentElement.scrollHeight;
+		if (finalCount === lastCount && finalHeight <= lastHeight) {
+			onProgress(finalCount, true);
+			return;
+		}
+		lastCount = finalCount;
+		lastHeight = Math.max(lastHeight, finalHeight);
+		lastProgressAt = Date.now();
 	}
-	onProgress(engine.tweetCount(), false);
+	onProgress(engine.observedCount(), false);
 }

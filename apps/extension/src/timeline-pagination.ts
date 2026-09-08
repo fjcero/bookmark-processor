@@ -1,5 +1,5 @@
 import type { CaptureEventDetail } from "@repo/import/capture/hooks-events";
-import { applySortIndexes, isGraphqlWriteOperation } from "@repo/import";
+import { applySortIndexes, isGraphqlWriteOperation, isImportableTweet } from "@repo/import";
 
 export interface TimelineJob {
 	source: "bookmark" | "like" | "history";
@@ -72,13 +72,17 @@ export function collectTimelineTweets(value: unknown): Record<string, unknown> {
 				result.__typename === "TweetWithVisibilityResult"
 					? record(result.tweet)
 					: result;
-			if (typeof unwrapped?.rest_id === "string") {
+			if (
+				unwrapped &&
+				typeof unwrapped.rest_id === "string" &&
+				isImportableTweet(unwrapped)
+			) {
 				tweets[unwrapped.rest_id] = unwrapped;
 			}
 		} else if (
 			typeof item.rest_id === "string" &&
 			item.__typename !== "User" &&
-			(item.legacy != null || item.core != null)
+			isImportableTweet(item)
 		) {
 			tweets[item.rest_id] = item;
 		}
